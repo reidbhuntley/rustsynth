@@ -20,7 +20,7 @@ pub struct Envelope {
     current_stage: EnvelopeStage,
     time_elapsed: f32,
     num_notes: i32,
-    prev_amplitude: f32,
+    release_amplitude: f32,
 }
 
 pub struct EnvelopeSettings {
@@ -43,7 +43,7 @@ impl Module for Envelope {
             inv_release: 1.0 / settings.release,
             time_elapsed: 0.0,
             num_notes: 0,
-            prev_amplitude: 0.0,
+            release_amplitude: 0.0,
             settings,
         })
         .with_buf_in::<MidiEvents>()
@@ -64,16 +64,20 @@ impl Module for Envelope {
                             self.num_notes += 1;
                             self.current_stage = EnvelopeStage::Attack;
                             self.time_elapsed = 0.0;
-                            self.prev_amplitude = 0.0;
+                            self.release_amplitude = 0.0;
                         }
                         midly::MidiMessage::NoteOff { .. } => {
                             self.num_notes -= 1;
-                            match self.current_stage {
-                                EnvelopeStage::Release | EnvelopeStage::Silence => {}
-                                _ => {
-                                    self.current_stage = EnvelopeStage::Release;
-                                    self.time_elapsed = 0.0;
+                            if self.num_notes == 0 {
+                                match self.current_stage {
+                                    EnvelopeStage::Release | EnvelopeStage::Silence => {}
+                                    _ => {
+                                        self.current_stage = EnvelopeStage::Release;
+                                        self.time_elapsed = 0.0;
+                                    }
                                 }
+                            } else {
+                                self.current_stage = EnvelopeStage::Sustain;
                             }
                         }
                         _ => {}
@@ -88,8 +92,8 @@ impl Module for Envelope {
                     self.time_elapsed -= self.settings.attack;
                     self.current_stage = EnvelopeStage::Decay;
                 } else {
-                    self.prev_amplitude = self.time_elapsed * self.inv_attack;
-                    *buf_out = buf_in * self.prev_amplitude;
+                    self.release_amplitude = self.time_elapsed * self.inv_attack;
+                    *buf_out = buf_in * self.release_amplitude;
                     continue;
                 }
             }
@@ -97,24 +101,25 @@ impl Module for Envelope {
                 if self.time_elapsed >= self.settings.decay {
                     self.current_stage = EnvelopeStage::Sustain;
                 } else {
-                    self.prev_amplitude = (1.0 - self.settings.sustain)
+                    self.release_amplitude = (1.0 - self.settings.sustain)
                         * (1.0 - self.time_elapsed * self.inv_decay)
                         + self.settings.sustain;
-                    *buf_out = buf_in * self.prev_amplitude;
+                    *buf_out = buf_in * self.release_amplitude;
                     continue;
                 }
             }
             if let EnvelopeStage::Sustain = self.current_stage {
-                self.prev_amplitude = self.settings.sustain;
-                *buf_out = buf_in * self.prev_amplitude;
+                self.release_amplitude = self.settings.sustain;
+                *buf_out = buf_in * self.release_amplitude;
                 continue;
             }
             if let EnvelopeStage::Release = self.current_stage {
                 if self.time_elapsed >= self.settings.release {
                     self.current_stage = EnvelopeStage::Silence;
                 } else {
-                    *buf_out =
-                        buf_in * self.prev_amplitude * (1.0 - self.time_elapsed * self.inv_release);
+                    *buf_out = buf_in
+                        * self.release_amplitude
+                        * (1.0 - self.time_elapsed * self.inv_release);
                     continue;
                 }
             }

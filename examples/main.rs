@@ -65,7 +65,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         attack: 0.0,
         decay: 1.0,
         sustain: 0.6,
-        release: 1.0,
+        release: 0.6,
     });
     host.link::<MidiEvents>(midi.buf_out(0), carrier_envelope.buf_in(0));
     host.link::<f32>(carrier_osc.buf_out(0), carrier_envelope.buf_in(0));
