@@ -47,11 +47,11 @@ mod private {
 
     pub struct BufferOutPort<T: BufferElem> {
         pub buffer: super::Buffer<T>,
-        pub dependents: Vec<super::BufferInPortHandle<T>>,
+        pub dependents: Vec<super::ModuleBufferInHandle<T>>,
     }
 
     pub enum BufferInPort<T: BufferElem> {
-        OutBuffer(super::BufferOutPortHandle<T>),
+        OutBuffer(super::ModuleBufferOutHandle<T>),
         Constant(super::Buffer<T>),
     }
 
@@ -239,29 +239,51 @@ type BufferInPorts<T> = Vec<BufferInPort<T>>;
 
 type BufferOutPorts<T> = Vec<BufferOutPort<T>>;
 
-#[derive(Clone, Eq)]
-pub struct BufferInPortHandle<T: BufferElem> {
+#[derive(Default, Clone, Eq)]
+pub struct BufferInHandle<T: BufferElem> {
     _marker: std::marker::PhantomData<T>,
-    module_handle: ModuleHandle,
-    port_idx: usize,
+    idx: usize,
 }
 
-impl<T: BufferElem> PartialEq for BufferInPortHandle<T> {
+impl<T: BufferElem> PartialEq for BufferInHandle<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.module_handle == other.module_handle && self.port_idx == other.port_idx
+        self.idx == other.idx
+    }
+}
+
+#[derive(Default, Clone, Eq)]
+pub struct BufferOutHandle<T: BufferElem> {
+    _marker: std::marker::PhantomData<T>,
+    idx: usize,
+}
+
+impl<T: BufferElem> PartialEq for BufferOutHandle<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.idx == other.idx
     }
 }
 
 #[derive(Clone, Eq)]
-pub struct BufferOutPortHandle<T: BufferElem> {
-    _marker: std::marker::PhantomData<T>,
+pub struct ModuleBufferInHandle<T: BufferElem> {
     module_handle: ModuleHandle,
-    buffer_idx: usize,
+    buf_handle: BufferInHandle<T>,
 }
 
-impl<T: BufferElem> PartialEq for BufferOutPortHandle<T> {
+impl<T: BufferElem> PartialEq for ModuleBufferInHandle<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.module_handle == other.module_handle && self.buffer_idx == other.buffer_idx
+        self.module_handle == other.module_handle && self.buf_handle == other.buf_handle
+    }
+}
+
+#[derive(Clone, Eq)]
+pub struct ModuleBufferOutHandle<T: BufferElem> {
+    module_handle: ModuleHandle,
+    buf_handle: BufferOutHandle<T>,
+}
+
+impl<T: BufferElem> PartialEq for ModuleBufferOutHandle<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.module_handle == other.module_handle && self.buf_handle == other.buf_handle
     }
 }
 
@@ -377,19 +399,23 @@ pub struct ModuleHandle {
 }
 
 impl ModuleHandle {
-    pub fn buf_in<T: BufferElem>(&self, idx: usize) -> BufferInPortHandle<T> {
-        BufferInPortHandle {
-            _marker: Default::default(),
+    pub fn buf_in<T: BufferElem>(&self, port_idx: usize) -> ModuleBufferInHandle<T> {
+        ModuleBufferInHandle {
             module_handle: self.clone(),
-            port_idx: idx,
+            buf_handle: BufferInHandle {
+                idx: port_idx,
+                ..Default::default()
+            },
         }
     }
 
-    pub fn buf_out<T: BufferElem>(&self, idx: usize) -> BufferOutPortHandle<T> {
-        BufferOutPortHandle {
-            _marker: Default::default(),
+    pub fn buf_out<T: BufferElem>(&self, buffer_idx: usize) -> ModuleBufferOutHandle<T> {
+        ModuleBufferOutHandle {
             module_handle: self.clone(),
-            buffer_idx: idx,
+            buf_handle: BufferOutHandle {
+                idx: buffer_idx,
+                ..Default::default()
+            },
         }
     }
 }
@@ -431,7 +457,7 @@ impl Host {
 
     fn set_buffer_in<T: BufferElem>(
         &mut self,
-        port_handle: BufferInPortHandle<T>,
+        port_handle: ModuleBufferInHandle<T>,
         new: BufferInPort<T>,
     ) {
         let module_in = self
@@ -439,7 +465,7 @@ impl Host {
             .get_mut(&port_handle.module_handle.idx)
             .unwrap();
 
-        let port = &T::get_buffers_in(&module_in.buf_in)[port_handle.port_idx];
+        let port = &T::get_buffers_in(&module_in.buf_in)[port_handle.buf_handle.idx];
         let (old_out, new_out) = match port {
             BufferInPort::OutBuffer(out) => (
                 Some(out.clone()),
@@ -463,18 +489,18 @@ impl Host {
             ),
         };
 
-        T::get_buffers_in_mut(&mut module_in.buf_in)[port_handle.port_idx] = new;
+        T::get_buffers_in_mut(&mut module_in.buf_in)[port_handle.buf_handle.idx] = new;
 
         if let Some(old_out) = old_out {
             let module_out = self.modules.get_mut(&old_out.module_handle.idx).unwrap();
-            T::get_buffers_out_mut(&mut module_out.buf_out)[old_out.buffer_idx]
+            T::get_buffers_out_mut(&mut module_out.buf_out)[old_out.buf_handle.idx]
                 .dependents
                 .retain(|d| d != &port_handle);
         }
 
         if let Some(new_out) = new_out {
             let module_out = self.modules.get_mut(&new_out.module_handle.idx).unwrap();
-            T::get_buffers_out_mut(&mut module_out.buf_out)[new_out.buffer_idx]
+            T::get_buffers_out_mut(&mut module_out.buf_out)[new_out.buf_handle.idx]
                 .dependents
                 .push(port_handle);
         }
@@ -482,13 +508,13 @@ impl Host {
 
     pub fn link<T: BufferElem>(
         &mut self,
-        handle_out: BufferOutPortHandle<T>,
-        handle_in: BufferInPortHandle<T>,
+        handle_out: ModuleBufferOutHandle<T>,
+        handle_in: ModuleBufferInHandle<T>,
     ) {
         self.set_buffer_in(handle_in, BufferInPort::OutBuffer(handle_out));
     }
 
-    pub fn link_value<T: BufferElem>(&mut self, value: T, handle_in: BufferInPortHandle<T>) {
+    pub fn link_value<T: BufferElem>(&mut self, value: T, handle_in: ModuleBufferInHandle<T>) {
         self.set_buffer_in(handle_in, BufferInPort::with_constant(value));
     }
 
@@ -510,10 +536,12 @@ impl Host {
                 match in_port {
                     BufferInPort::OutBuffer(_) => {
                         host.set_buffer_in(
-                            BufferInPortHandle {
-                                _marker: Default::default(),
+                            ModuleBufferInHandle {
                                 module_handle: module_handle.clone(),
-                                port_idx,
+                                buf_handle: BufferInHandle {
+                                    idx: port_idx,
+                                    ..Default::default()
+                                },
                             },
                             BufferInPort::<T>::default(),
                         );
@@ -585,7 +613,7 @@ impl Host {
                 .map(|port| match port {
                     BufferInPort::OutBuffer(handle) => {
                         let buf_out = &host.modules.get(&handle.module_handle.idx).unwrap().buf_out;
-                        &T::get_buffers_out(buf_out)[handle.buffer_idx].buffer as *const _
+                        &T::get_buffers_out(buf_out)[handle.buf_handle.idx].buffer as *const _
                     }
                     BufferInPort::Constant(buf) => buf,
                 })
