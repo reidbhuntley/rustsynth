@@ -4,7 +4,7 @@ use arr_macro::arr;
 use rodio::Source;
 use seahash::SeaHasher;
 
-use crate::{constants::*, midi::MidiEvents, output::AudioOutput};
+use crate::{constants::*, midi::MidiEvents, output::AudioOutput, output::AudioOutputModule};
 
 use self::private::{
     BufferInPort, BufferOutPort, ModuleBuffersDescriptor, ModuleBuffersInInternal,
@@ -41,8 +41,8 @@ mod private {
     use std::sync::atomic::AtomicUsize;
 
     use super::{
-        BufferElem, BufferInPorts, BufferOutPorts, BuffersInExt, BuffersOutExt,
-        ModuleBuffersDescriptorsAll, ModuleBuffersIn, ModuleBuffersOut,
+        BufferElem, BufferInPorts, BufferOutPorts, BuffersInExt, BuffersOutExt, ModuleBuffersIn,
+        ModuleBuffersOut, ModuleDescriptor,
     };
 
     pub struct BufferOutPort<T: BufferElem> {
@@ -67,7 +67,7 @@ mod private {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     pub struct ModuleBuffersDescriptor<T: BufferElem> {
         pub buf_in: Vec<T>,
         pub buf_out: Vec<()>,
@@ -82,13 +82,13 @@ mod private {
     }
 
     impl ModuleBuffersInInternal {
-        pub fn new(descriptors: &ModuleBuffersDescriptorsAll) -> Self {
+        pub fn new(descriptors: &ModuleDescriptor) -> Self {
             let mut out = Self::default();
             out.add_num_buffers_all(&descriptors);
             out
         }
 
-        pub fn add_num_buffers_all(&mut self, descriptors: &ModuleBuffersDescriptorsAll) {
+        pub fn add_num_buffers_all(&mut self, descriptors: &ModuleDescriptor) {
             Self::add_num_buffers(&mut self.buf_signal, &descriptors.buf_signal);
             Self::add_num_buffers(&mut self.buf_midi, &descriptors.buf_midi);
         }
@@ -110,13 +110,13 @@ mod private {
     }
 
     impl ModuleBuffersOutInternal {
-        pub fn new(descriptors: &ModuleBuffersDescriptorsAll) -> Self {
+        pub fn new(descriptors: &ModuleDescriptor) -> Self {
             let mut out = Self::default();
             out.add_num_buffers_all(&descriptors);
             out
         }
 
-        pub fn add_num_buffers_all(&mut self, descriptors: &ModuleBuffersDescriptorsAll) {
+        pub fn add_num_buffers_all(&mut self, descriptors: &ModuleDescriptor) {
             Self::add_num_buffers(&mut self.buf_signal, &descriptors.buf_signal);
             Self::add_num_buffers(&mut self.buf_midi, &descriptors.buf_midi);
         }
@@ -159,9 +159,7 @@ mod private {
         where
             Self: Sized + BufferElem;
 
-        fn get_descriptor(
-            descriptors: &mut ModuleBuffersDescriptorsAll,
-        ) -> &mut ModuleBuffersDescriptor<Self>
+        fn get_descriptor(descriptors: &mut ModuleDescriptor) -> &mut ModuleBuffersDescriptor<Self>
         where
             Self: Sized + BufferElem;
     }
@@ -193,7 +191,7 @@ mod private {
         }
 
         fn get_descriptor(
-            descriptors: &mut ModuleBuffersDescriptorsAll,
+            descriptors: &mut ModuleDescriptor,
         ) -> &mut ModuleBuffersDescriptor<Self> {
             &mut descriptors.buf_signal
         }
@@ -226,7 +224,7 @@ mod private {
         }
 
         fn get_descriptor(
-            descriptors: &mut ModuleBuffersDescriptorsAll,
+            descriptors: &mut ModuleDescriptor,
         ) -> &mut ModuleBuffersDescriptor<Self> {
             &mut descriptors.buf_midi
         }
@@ -251,6 +249,8 @@ impl<T: BufferElem> PartialEq for BufferInHandle<T> {
     }
 }
 
+impl<T: BufferElem> Copy for BufferInHandle<T> {}
+
 #[derive(Default, Clone, Eq)]
 pub struct BufferOutHandle<T: BufferElem> {
     _marker: std::marker::PhantomData<T>,
@@ -262,6 +262,8 @@ impl<T: BufferElem> PartialEq for BufferOutHandle<T> {
         self.idx == other.idx
     }
 }
+
+impl<T: BufferElem> Copy for BufferOutHandle<T> {}
 
 #[derive(Clone, Eq)]
 pub struct ModuleBufferInHandle<T: BufferElem> {
@@ -287,41 +289,49 @@ impl<T: BufferElem> PartialEq for ModuleBufferOutHandle<T> {
     }
 }
 
-#[derive(Default)]
-pub struct ModuleBuffersDescriptorsAll {
+#[derive(Default, Clone)]
+pub struct ModuleDescriptor {
     buf_signal: ModuleBuffersDescriptor<f32>,
     buf_midi: ModuleBuffersDescriptor<MidiEvents>,
 }
 
-pub struct ModuleDescriptor<T> {
+pub struct BuiltModuleDescriptor<T: Module> {
     initial_data: Box<T>,
-    buffers_descriptors: ModuleBuffersDescriptorsAll,
+    buffers_descriptors: ModuleDescriptor,
 }
 
-impl<T> ModuleDescriptor<T> {
-    pub fn new(initial_data: T) -> Self {
-        Self {
+impl ModuleDescriptor {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn build<T: Module>(self, initial_data: T) -> BuiltModuleDescriptor<T> {
+        BuiltModuleDescriptor {
             initial_data: Box::new(initial_data),
-            buffers_descriptors: Default::default(),
+            buffers_descriptors: self,
         }
     }
 
-    pub fn with_buf_in_default<E: BufferElem>(mut self, default: E) -> Self {
-        E::get_descriptor(&mut self.buffers_descriptors)
-            .buf_in
-            .push(default);
-        self
+    pub fn with_buf_in_default<E: BufferElem>(&mut self, default: E) -> BufferInHandle<E> {
+        let buffers_in = &mut E::get_descriptor(self).buf_in;
+        buffers_in.push(default);
+        BufferInHandle {
+            idx: buffers_in.len() - 1,
+            ..Default::default()
+        }
     }
 
-    pub fn with_buf_in<E: BufferElem>(self) -> Self {
+    pub fn with_buf_in<E: BufferElem>(&mut self) -> BufferInHandle<E> {
         self.with_buf_in_default::<E>(Default::default())
     }
 
-    pub fn with_buf_out<E: BufferElem>(mut self) -> Self {
-        E::get_descriptor(&mut self.buffers_descriptors)
-            .buf_out
-            .push(());
-        self
+    pub fn with_buf_out<E: BufferElem>(&mut self) -> BufferOutHandle<E> {
+        let buffers_out = &mut E::get_descriptor(self).buf_out;
+        buffers_out.push(());
+        BufferOutHandle {
+            idx: buffers_out.len() - 1,
+            ..Default::default()
+        }
     }
 }
 
@@ -333,8 +343,8 @@ pub struct ModuleBuffersIn {
 }
 
 impl ModuleBuffersIn {
-    pub fn get<T: BufferElem>(&self, idx: usize) -> &Buffer<T> {
-        let bufs = T::get_ext_buffers_in(&self)[idx];
+    pub fn get<T: BufferElem>(&self, buffer: BufferInHandle<T>) -> &Buffer<T> {
+        let bufs = T::get_ext_buffers_in(&self)[buffer.idx];
         unsafe { &*bufs }
     }
 
@@ -353,8 +363,8 @@ pub struct ModuleBuffersOut {
 }
 
 impl ModuleBuffersOut {
-    pub fn get<T: BufferElem>(&mut self, idx: usize) -> &mut Buffer<T> {
-        let bufs = T::get_ext_buffers_out(&self)[idx];
+    pub fn get<T: BufferElem>(&mut self, buffer: BufferOutHandle<T>) -> &mut Buffer<T> {
+        let bufs = T::get_ext_buffers_out(&self)[buffer.idx];
         unsafe { &mut *bufs }
     }
 
@@ -370,7 +380,7 @@ pub trait ModuleTypes {
 }
 
 pub trait Module: 'static + Any {
-    fn init(settings: Self::Settings) -> ModuleDescriptor<Self>
+    fn init(settings: Self::Settings) -> BuiltModuleDescriptor<Self>
     where
         Self: Sized + ModuleTypes;
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut);
@@ -436,7 +446,7 @@ impl Host {
             output: output.clone().stoppable(),
             output_handle: Default::default(),
         };
-        out.output_handle = out.create_module::<AudioOutput>(output);
+        out.output_handle = out.create_module::<AudioOutputModule>(output);
         out
     }
 

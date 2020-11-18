@@ -1,6 +1,9 @@
 use crate::{
     constants::*,
-    host::{Module, ModuleBuffersIn, ModuleBuffersOut, ModuleDescriptor, ModuleTypes},
+    host::{
+        BufferInHandle, BufferOutHandle, BuiltModuleDescriptor, Module, ModuleBuffersIn,
+        ModuleBuffersOut, ModuleDescriptor, ModuleTypes,
+    },
     midi::{MidiEvent, MidiEvents},
 };
 
@@ -13,6 +16,9 @@ enum EnvelopeStage {
 }
 
 pub struct Envelope {
+    midi_in: BufferInHandle<MidiEvents>,
+    signal_in: BufferInHandle<f32>,
+    signal_out: BufferOutHandle<f32>,
     settings: EnvelopeSettings,
     inv_attack: f32,
     inv_decay: f32,
@@ -35,8 +41,12 @@ impl ModuleTypes for Envelope {
 }
 
 impl Module for Envelope {
-    fn init(settings: EnvelopeSettings) -> ModuleDescriptor<Self> {
-        ModuleDescriptor::new(Envelope {
+    fn init(settings: EnvelopeSettings) -> BuiltModuleDescriptor<Self> {
+        let mut desc = ModuleDescriptor::new();
+        let module = Self {
+            midi_in: desc.with_buf_in::<MidiEvents>(),
+            signal_in: desc.with_buf_in::<f32>(),
+            signal_out: desc.with_buf_out::<f32>(),
             current_stage: EnvelopeStage::Silence,
             inv_attack: 1.0 / settings.attack,
             inv_decay: 1.0 / settings.decay,
@@ -45,17 +55,16 @@ impl Module for Envelope {
             num_notes: 0,
             release_amplitude: 0.0,
             settings,
-        })
-        .with_buf_in::<MidiEvents>()
-        .with_buf_in::<f32>()
-        .with_buf_out::<f32>()
+        };
+        desc.build(module)
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
-        let midi_in = buffers_in.get::<MidiEvents>(0);
-        let buf_in = buffers_in.get::<f32>(0);
-        let buf_out = buffers_out.get::<f32>(0);
-        for ((midis, buf_in), buf_out) in midi_in.iter().zip(buf_in.iter()).zip(buf_out.iter_mut())
+        for ((midis, signal_in), signal_out) in buffers_in
+            .get(self.midi_in)
+            .iter()
+            .zip(buffers_in.get(self.signal_in).iter())
+            .zip(buffers_out.get(self.signal_out).iter_mut())
         {
             for midi in midis.iter() {
                 if let MidiEvent::Midi { message, .. } = midi {
@@ -93,7 +102,7 @@ impl Module for Envelope {
                     self.current_stage = EnvelopeStage::Decay;
                 } else {
                     self.release_amplitude = self.time_elapsed * self.inv_attack;
-                    *buf_out = buf_in * self.release_amplitude;
+                    *signal_out = signal_in * self.release_amplitude;
                     continue;
                 }
             }
@@ -104,32 +113,35 @@ impl Module for Envelope {
                     self.release_amplitude = (1.0 - self.settings.sustain)
                         * (1.0 - self.time_elapsed * self.inv_decay)
                         + self.settings.sustain;
-                    *buf_out = buf_in * self.release_amplitude;
+                    *signal_out = signal_in * self.release_amplitude;
                     continue;
                 }
             }
             if let EnvelopeStage::Sustain = self.current_stage {
                 self.release_amplitude = self.settings.sustain;
-                *buf_out = buf_in * self.release_amplitude;
+                *signal_out = signal_in * self.release_amplitude;
                 continue;
             }
             if let EnvelopeStage::Release = self.current_stage {
                 if self.time_elapsed >= self.settings.release {
                     self.current_stage = EnvelopeStage::Silence;
                 } else {
-                    *buf_out = buf_in
+                    *signal_out = signal_in
                         * self.release_amplitude
                         * (1.0 - self.time_elapsed * self.inv_release);
                     continue;
                 }
             }
 
-            *buf_out = 0.0;
+            *signal_out = 0.0;
         }
     }
 }
 
-pub struct Op(OpType);
+pub struct Op {
+    signal_out: BufferOutHandle<f32>,
+    op: OpType,
+}
 
 #[derive(Clone, Copy)]
 pub enum OpType {
@@ -143,52 +155,57 @@ impl ModuleTypes for Op {
 }
 
 impl Module for Op {
-    fn init(operation: OpType) -> ModuleDescriptor<Self> {
-        let mut desc = ModuleDescriptor::new(Self(operation)).with_buf_out::<f32>();
+    fn init(operation: OpType) -> BuiltModuleDescriptor<Self> {
+        let mut desc = ModuleDescriptor::new();
         match operation {
             OpType::Add(n) => {
                 for _ in 0..n {
-                    desc = desc.with_buf_in_default::<f32>(0.0);
+                    desc.with_buf_in_default::<f32>(0.0);
                 }
             }
             OpType::Multiply(n) => {
                 for _ in 0..n {
-                    desc = desc.with_buf_in_default::<f32>(1.0);
+                    desc.with_buf_in_default::<f32>(1.0);
                 }
             }
             OpType::Negate => {
-                desc = desc.with_buf_in_default::<f32>(0.0);
+                desc.with_buf_in_default::<f32>(0.0);
             }
         }
-        desc
+
+        let module = Self {
+            op: operation,
+            signal_out: desc.with_buf_out::<f32>(),
+        };
+        desc.build(module)
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
-        let buf_out = buffers_out.get::<f32>(0);
-        match self.0 {
+        let signal_out = buffers_out.get(self.signal_out);
+        match self.op {
             OpType::Add(_) => {
-                for val_out in buf_out.iter_mut() {
+                for val_out in signal_out.iter_mut() {
                     *val_out = 0.0;
                 }
                 for buf_in in buffers_in.iter() {
-                    for (val_in, val_out) in buf_in.iter().zip(buf_out.iter_mut()) {
+                    for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
                         *val_out += val_in;
                     }
                 }
             }
             OpType::Multiply(_) => {
-                for val_out in buf_out.iter_mut() {
+                for val_out in signal_out.iter_mut() {
                     *val_out = 1.0;
                 }
                 for buf_in in buffers_in.iter() {
-                    for (val_in, val_out) in buf_in.iter().zip(buf_out.iter_mut()) {
+                    for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
                         *val_out *= val_in;
                     }
                 }
             }
             OpType::Negate => {
-                let buf_in = buffers_in.get::<f32>(0);
-                for (val_in, val_out) in buf_in.iter().zip(buf_out.iter_mut()) {
+                let buf_in = buffers_in.iter::<f32>().next().unwrap();
+                for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
                     *val_out = -val_in;
                 }
             }
@@ -198,6 +215,11 @@ impl Module for Op {
 
 #[derive(Default)]
 pub struct Oscillator {
+    midi_in: BufferInHandle<MidiEvents>,
+    pitch_shift: BufferInHandle<f32>,
+    vel_amt: BufferInHandle<f32>,
+    freq_mod: BufferInHandle<f32>,
+    signal_out: BufferOutHandle<f32>,
     velocity: u8,
     semitone: f32,
     bend: f32,
@@ -207,39 +229,27 @@ pub struct Oscillator {
 }
 
 impl Oscillator {
-    pub fn sine(table_len: usize) -> Self {
+    fn sine(table_len: usize) -> Vec<f32> {
         let inv_len = 1.0 / table_len as f32;
-        Self {
-            wavetable: (0..table_len)
-                .map(|i| (i as f32 * std::f32::consts::TAU * inv_len).sin())
-                .collect(),
-            ..Default::default()
-        }
+        (0..table_len)
+            .map(|i| (i as f32 * std::f32::consts::TAU * inv_len).sin())
+            .collect()
     }
 
-    pub fn saw(table_len: usize) -> Self {
+    fn saw(table_len: usize) -> Vec<f32> {
         let inv_len = 1.0 / table_len as f32;
-        Self {
-            wavetable: (0..table_len).map(|i| i as f32 * inv_len).collect(),
-            ..Default::default()
-        }
+        (0..table_len).map(|i| i as f32 * inv_len).collect()
     }
 
-    pub fn triangle(table_len: usize) -> Self {
+    fn triangle(table_len: usize) -> Vec<f32> {
         let inv_len = 1.0 / table_len as f32;
-        Self {
-            wavetable: (0..table_len)
-                .map(|i| 1.0 - 2.0 * (i as f32 * inv_len - 0.5).abs())
-                .collect(),
-            ..Default::default()
-        }
+        (0..table_len)
+            .map(|i| 1.0 - 2.0 * (i as f32 * inv_len - 0.5).abs())
+            .collect()
     }
 
-    pub fn square() -> Self {
-        Self {
-            wavetable: vec![-1.0, 1.0],
-            ..Default::default()
-        }
+    fn square() -> Vec<f32> {
+        vec![-1.0, 1.0]
     }
 }
 
@@ -255,32 +265,33 @@ impl ModuleTypes for Oscillator {
 }
 
 impl Module for Oscillator {
-    fn init(settings: OscillatorSettings) -> ModuleDescriptor<Self> {
-        ModuleDescriptor::new(match settings {
-            OscillatorSettings::Sine(table_len) => Self::sine(table_len),
-            OscillatorSettings::Saw(table_len) => Self::saw(table_len),
-            OscillatorSettings::Triangle(table_len) => Self::triangle(table_len),
-            OscillatorSettings::Square => Self::square(),
-        })
-        .with_buf_in_default::<f32>(1.0) // 0: pitch_shift
-        .with_buf_in_default::<f32>(0.0) // 1: vel_amt
-        .with_buf_in_default::<f32>(0.0) // 2: freq_mod
-        .with_buf_in::<MidiEvents>()
-        .with_buf_out::<f32>()
+    fn init(settings: OscillatorSettings) -> BuiltModuleDescriptor<Self> {
+        let mut desc = ModuleDescriptor::new();
+        let module = Self {
+            midi_in: desc.with_buf_in::<MidiEvents>(),
+            pitch_shift: desc.with_buf_in_default::<f32>(1.0),
+            vel_amt: desc.with_buf_in_default::<f32>(0.0),
+            freq_mod: desc.with_buf_in_default::<f32>(0.0),
+            signal_out: desc.with_buf_out::<f32>(),
+            wavetable: match settings {
+                OscillatorSettings::Sine(table_len) => Self::sine(table_len),
+                OscillatorSettings::Saw(table_len) => Self::saw(table_len),
+                OscillatorSettings::Triangle(table_len) => Self::triangle(table_len),
+                OscillatorSettings::Square => Self::square(),
+            },
+            ..Default::default()
+        };
+        desc.build(module)
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
-        let pitch_shift = buffers_in.get::<f32>(0);
-        let vel_amt = buffers_in.get::<f32>(1);
-        let freq_mod = buffers_in.get::<f32>(2);
-        let midi = buffers_in.get::<MidiEvents>(0);
-        let out = buffers_out.get::<f32>(0);
-        for (_i, ((((midis, pitch_shift), vel_amt), freq_mod), out)) in midi
+        for (_i, ((((midis, pitch_shift), vel_amt), freq_mod), out)) in buffers_in
+            .get(self.midi_in)
             .iter()
-            .zip(pitch_shift.iter())
-            .zip(vel_amt.iter())
-            .zip(freq_mod.iter())
-            .zip(out.iter_mut())
+            .zip(buffers_in.get(self.pitch_shift).iter())
+            .zip(buffers_in.get(self.vel_amt).iter())
+            .zip(buffers_in.get(self.freq_mod).iter())
+            .zip(buffers_out.get(self.signal_out).iter_mut())
             .enumerate()
         {
             let mut updated = false;

@@ -8,7 +8,10 @@ use midly::num::*;
 
 use crate::{
     constants::*,
-    host::{Module, ModuleBuffersIn, ModuleBuffersOut, ModuleDescriptor, ModuleTypes},
+    host::{
+        BufferInHandle, BufferOutHandle, BuiltModuleDescriptor, Module, ModuleBuffersIn,
+        ModuleBuffersOut, ModuleDescriptor, ModuleTypes,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -69,6 +72,7 @@ struct RawEvent {
 pub type MidiEvents = Vec<MidiEvent>;
 
 pub struct MidiInput {
+    buf_out: BufferOutHandle<MidiEvents>,
     _conn_in: MidiInputConnection<()>,
     start_time: Instant,
     event_receiver: mpsc::Receiver<RawEvent>,
@@ -80,7 +84,7 @@ impl ModuleTypes for MidiInput {
 }
 
 impl Module for MidiInput {
-    fn init(port_idx: usize) -> ModuleDescriptor<Self> {
+    fn init(port_idx: usize) -> BuiltModuleDescriptor<Self> {
         let mut midi_in = MidirInput::new("midir reading input").unwrap();
         midi_in.ignore(Ignore::None);
 
@@ -104,20 +108,22 @@ impl Module for MidiInput {
             )
             .unwrap();
 
-        ModuleDescriptor::new(Self {
+        let mut desc = ModuleDescriptor::new();
+        let module = Self {
+            buf_out: desc.with_buf_out::<MidiEvents>(),
             _conn_in,
             start_time: Instant::now(),
             event_receiver: rx,
             event_queue: Vec::new(),
-        })
-        .with_buf_out::<MidiEvents>()
+        };
+        desc.build(module)
     }
 
     fn fill_buffers(&mut self, _buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
         let start_time_new = Instant::now();
         self.event_queue.extend(self.event_receiver.try_iter());
 
-        let buffer = &mut buffers_out.get::<MidiEvents>(0);
+        let buffer = &mut buffers_out.get(self.buf_out);
         for vec in buffer.iter_mut() {
             vec.clear();
         }
@@ -152,6 +158,8 @@ impl Module for MidiInput {
 }
 
 pub struct MidiSlider {
+    midi_in: BufferInHandle<MidiEvents>,
+    signal_out: BufferOutHandle<f32>,
     settings: MidiSliderSettings,
     range: f32,
     current_val: f32,
@@ -169,21 +177,23 @@ impl ModuleTypes for MidiSlider {
 }
 
 impl Module for MidiSlider {
-    fn init(settings: MidiSliderSettings) -> ModuleDescriptor<Self> {
-        ModuleDescriptor::new(Self {
+    fn init(settings: MidiSliderSettings) -> BuiltModuleDescriptor<Self> {
+        let mut desc = ModuleDescriptor::new();
+        let module = Self {
+            midi_in: desc.with_buf_in::<MidiEvents>(),
+            signal_out: desc.with_buf_out::<f32>(),
             current_val: settings.default,
             range: settings.max - settings.min,
             settings,
-        })
-        .with_buf_in::<MidiEvents>()
-        .with_buf_out::<f32>()
+        };
+        desc.build(module)
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
         for (midi, out) in buffers_in
-            .get::<MidiEvents>(0)
+            .get(self.midi_in)
             .iter()
-            .zip(buffers_out.get::<f32>(0).iter_mut())
+            .zip(buffers_out.get(self.signal_out).iter_mut())
         {
             let mut new_value: Option<u8> = None;
             for event in midi.iter() {
