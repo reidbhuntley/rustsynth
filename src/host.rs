@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap};
+use std::any::Any;
 
 use arr_macro::arr;
 use rodio::Source;
@@ -6,8 +6,8 @@ use rodio::Source;
 use crate::{constants::*, midi::MidiEvents, output::AudioOutput, output::AudioOutputModule};
 
 use self::private::{
-    BufferInPort, BuildHasher, ModuleBuffersDescriptor, ModuleBuffersInInternal,
-    ModuleBuffersOutInternal,
+    BufferInPort, FastHashMap, ModuleBufferInHandle, ModuleBufferOutHandle,
+    ModuleBuffersDescriptor, ModuleBuffersInInternal, ModuleBuffersOutInternal, ModuleHandle,
 };
 
 pub trait BufferElem: 'static + private::BufferElemSealed + Default + Clone {
@@ -46,13 +46,34 @@ mod private {
         }
     }
 
+    pub type FastHashMap<K, V> = HashMap<K, V, BuildHasher>;
+
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    pub struct ModuleHandle {
+        pub idx: usize,
+    }
+
+    #[derive(Educe, Eq)]
+    #[educe(Clone, Copy, PartialEq)]
+    pub struct ModuleBufferInHandle<T: BufferElem> {
+        pub module_handle: ModuleHandle,
+        pub buf_handle: BufferInHandle<T>,
+    }
+
+    #[derive(Educe, Eq)]
+    #[educe(Clone, Copy, PartialEq)]
+    pub struct ModuleBufferOutHandle<T: BufferElem> {
+        pub module_handle: ModuleHandle,
+        pub buf_handle: BufferOutHandle<T>,
+    }
+
     pub struct BufferOutPort<T: BufferElem> {
         pub buffer: super::Buffer<T>,
-        pub dependents: Vec<super::ModuleBufferInHandle<T>>,
+        pub dependents: Vec<ModuleBufferInHandle<T>>,
     }
 
     pub enum BufferInPort<T: BufferElem> {
-        OutBuffer(super::ModuleBufferOutHandle<T>),
+        OutBuffer(ModuleBufferOutHandle<T>),
         Constant(super::Buffer<T>),
     }
 
@@ -71,7 +92,7 @@ mod private {
     #[derive(Default)]
     pub struct BufferInPorts<T: BufferElem> {
         pub buffers: Vec<BufferInPort<T>>,
-        pub handles: HashMap<String, BufferInHandle<T>, BuildHasher>,
+        pub handles: FastHashMap<String, BufferInHandle<T>>,
     }
 
     impl<T: BufferElem> BufferInPorts<T> {
@@ -90,7 +111,7 @@ mod private {
     #[derive(Default)]
     pub struct BufferOutPorts<T: BufferElem> {
         pub buffers: Vec<BufferOutPort<T>>,
-        pub handles: HashMap<String, BufferOutHandle<T>, BuildHasher>,
+        pub handles: FastHashMap<String, BufferOutHandle<T>>,
     }
 
     impl<T: BufferElem> BufferOutPorts<T> {
@@ -307,20 +328,6 @@ pub struct BufferInHandle<T: BufferElem>(BufferHandle<T>);
 #[educe(Clone, Copy, PartialEq)]
 pub struct BufferOutHandle<T: BufferElem>(BufferHandle<T>);
 
-#[derive(Educe, Eq)]
-#[educe(Clone, Copy, PartialEq)]
-pub struct ModuleBufferInHandle<T: BufferElem> {
-    module_handle: ModuleHandle,
-    buf_handle: BufferInHandle<T>,
-}
-
-#[derive(Educe, Eq)]
-#[educe(Clone, Copy, PartialEq)]
-pub struct ModuleBufferOutHandle<T: BufferElem> {
-    module_handle: ModuleHandle,
-    buf_handle: BufferOutHandle<T>,
-}
-
 #[derive(Default, Clone)]
 pub struct ModuleDescriptor {
     buf_signal: ModuleBuffersDescriptor<f32>,
@@ -433,44 +440,37 @@ impl ModuleInternals {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub struct ModuleHandle {
-    idx: usize,
-}
-
 pub struct Host {
-    modules: HashMap<usize, ModuleInternals, BuildHasher>,
+    modules: FastHashMap<usize, ModuleInternals>,
+    handles: FastHashMap<String, ModuleHandle>,
     next_idx: usize,
     output: rodio::source::Stoppable<AudioOutput>,
-    output_handle: ModuleHandle,
 }
+
+const OUTPUT_MODULE_NAME: &str = "audio_out";
 
 impl Host {
     pub fn new() -> Self {
         let output = AudioOutput::new();
         let mut out = Self {
-            modules: HashMap::default(),
+            modules: Default::default(),
+            handles: Default::default(),
             next_idx: 0,
             output: output.clone().stoppable(),
-            output_handle: Default::default(),
         };
-        out.output_handle = out.create_module::<AudioOutputModule>(output);
+        out.create_module::<AudioOutputModule>(OUTPUT_MODULE_NAME, output);
         out
     }
 
-    pub fn output_module(&self) -> ModuleHandle {
-        self.output_handle.clone()
-    }
-
-    pub fn create_module<T: Module + ModuleTypes>(
-        &mut self,
-        settings: T::Settings,
-    ) -> ModuleHandle {
+    pub fn create_module<T: Module + ModuleTypes>(&mut self, name: &str, settings: T::Settings) {
+        if self.handles.contains_key(name) {
+            panic!()
+        }
         let module = ModuleInternals::new::<T>(settings);
         let idx = self.next_idx;
         self.next_idx += 1;
         self.modules.insert(idx, module);
-        ModuleHandle { idx }
+        self.handles.insert(name.to_owned(), ModuleHandle { idx });
     }
 
     fn set_buffer_in<T: BufferElem>(
@@ -526,42 +526,40 @@ impl Host {
 
     pub fn link<T: BufferElem>(
         &mut self,
-        module_out: ModuleHandle,
+        module_out: &str,
         buf_name_out: &str,
-        module_in: ModuleHandle,
+        module_in: &str,
         buf_name_in: &str,
     ) {
+        let handle_out = self.handles[module_out];
         let buf_out = ModuleBufferOutHandle {
-            module_handle: module_out.clone(),
-            buf_handle: T::get_buffers_out(&self.modules[&module_out.idx].buf_out).handles
+            module_handle: handle_out,
+            buf_handle: T::get_buffers_out(&self.modules[&handle_out.idx].buf_out).handles
                 [buf_name_out],
         };
 
+        let handle_in = self.handles[module_in];
         let buf_in = ModuleBufferInHandle {
-            module_handle: module_in.clone(),
-            buf_handle: T::get_buffers_in(&self.modules[&module_in.idx].buf_in).handles
+            module_handle: handle_in,
+            buf_handle: T::get_buffers_in(&self.modules[&handle_in.idx].buf_in).handles
                 [buf_name_in],
         };
 
         self.set_buffer_in(buf_in, BufferInPort::OutBuffer(buf_out));
     }
 
-    pub fn link_value<T: BufferElem>(
-        &mut self,
-        value: T,
-        module_in: ModuleHandle,
-        buf_name_in: &str,
-    ) {
+    pub fn link_value<T: BufferElem>(&mut self, value: T, module_in: &str, buf_name_in: &str) {
+        let handle_in = self.handles[module_in];
         let buf_in = ModuleBufferInHandle {
-            module_handle: module_in.clone(),
-            buf_handle: T::get_buffers_in(&self.modules[&module_in.idx].buf_in).handles
+            module_handle: handle_in,
+            buf_handle: T::get_buffers_in(&self.modules[&handle_in.idx].buf_in).handles
                 [buf_name_in],
         };
 
         self.set_buffer_in(buf_in, BufferInPort::with_constant(value));
     }
 
-    pub fn destroy_module(&mut self, handle: &ModuleHandle) {
+    pub fn destroy_module(&mut self, module: &str) {
         fn remove_dependents<T: BufferElem>(host: &mut Host, module: &ModuleInternals) {
             for out_port in T::get_buffers_out(&module.buf_out).buffers.iter() {
                 for dep_handle in out_port.dependents.iter() {
@@ -573,7 +571,7 @@ impl Host {
         fn remove_dependencies<T: BufferElem>(
             host: &mut Host,
             module: &ModuleInternals,
-            module_handle: &ModuleHandle,
+            module_handle: ModuleHandle,
         ) {
             for (port_idx, in_port) in T::get_buffers_in(&module.buf_in).buffers.iter().enumerate()
             {
@@ -592,13 +590,17 @@ impl Host {
             }
         }
 
-        if *handle != self.output_handle {
-            let module = self.modules.remove(&handle.idx).unwrap();
-            remove_dependents::<f32>(self, &module);
-            remove_dependencies::<f32>(self, &module, &handle);
-            remove_dependents::<MidiEvents>(self, &module);
-            remove_dependencies::<MidiEvents>(self, &module, &handle);
+        if module == OUTPUT_MODULE_NAME {
+            panic!()
         }
+
+        let handle = self.handles.remove(module).unwrap();
+
+        let module = self.modules.remove(&handle.idx).unwrap();
+        remove_dependents::<f32>(self, &module);
+        remove_dependencies::<f32>(self, &module, handle);
+        remove_dependents::<MidiEvents>(self, &module);
+        remove_dependencies::<MidiEvents>(self, &module, handle);
     }
 
     // pub fn update_module<T: Module + ModuleTypes>(
