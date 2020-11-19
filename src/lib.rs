@@ -4,3 +4,6 @@ pub mod modules;
 pub mod output;
 
 pub mod constants;
+
+#[macro_use]
+extern crate educe;

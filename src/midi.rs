@@ -110,7 +110,7 @@ impl Module for MidiInput {
 
         let mut desc = ModuleDescriptor::new();
         let module = Self {
-            buf_out: desc.with_buf_out::<MidiEvents>(),
+            buf_out: desc.with_buf_out::<MidiEvents>("out"),
             _conn_in,
             start_time: Instant::now(),
             event_receiver: rx,
@@ -180,8 +180,8 @@ impl Module for MidiSlider {
     fn init(settings: MidiSliderSettings) -> BuiltModuleDescriptor<Self> {
         let mut desc = ModuleDescriptor::new();
         let module = Self {
-            midi_in: desc.with_buf_in::<MidiEvents>(),
-            signal_out: desc.with_buf_out::<f32>(),
+            midi_in: desc.with_buf_in::<MidiEvents>("in"),
+            signal_out: desc.with_buf_out::<f32>("out"),
             current_val: settings.default,
             range: settings.max - settings.min,
             settings,

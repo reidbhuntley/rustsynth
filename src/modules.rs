@@ -44,9 +44,9 @@ impl Module for Envelope {
     fn init(settings: EnvelopeSettings) -> BuiltModuleDescriptor<Self> {
         let mut desc = ModuleDescriptor::new();
         let module = Self {
-            midi_in: desc.with_buf_in::<MidiEvents>(),
-            signal_in: desc.with_buf_in::<f32>(),
-            signal_out: desc.with_buf_out::<f32>(),
+            midi_in: desc.with_buf_in::<MidiEvents>("in"),
+            signal_in: desc.with_buf_in::<f32>("in"),
+            signal_out: desc.with_buf_out::<f32>("out"),
             current_stage: EnvelopeStage::Silence,
             inv_attack: 1.0 / settings.attack,
             inv_decay: 1.0 / settings.decay,
@@ -159,23 +159,23 @@ impl Module for Op {
         let mut desc = ModuleDescriptor::new();
         match operation {
             OpType::Add(n) => {
-                for _ in 0..n {
-                    desc.with_buf_in_default::<f32>(0.0);
+                for i in 0..n {
+                    desc.with_buf_in_default::<f32>(&i.to_string(), 0.0);
                 }
             }
             OpType::Multiply(n) => {
-                for _ in 0..n {
-                    desc.with_buf_in_default::<f32>(1.0);
+                for i in 0..n {
+                    desc.with_buf_in_default::<f32>(&i.to_string(), 1.0);
                 }
             }
             OpType::Negate => {
-                desc.with_buf_in_default::<f32>(0.0);
+                desc.with_buf_in_default::<f32>("0", 0.0);
             }
         }
 
         let module = Self {
             op: operation,
-            signal_out: desc.with_buf_out::<f32>(),
+            signal_out: desc.with_buf_out::<f32>("out"),
         };
         desc.build(module)
     }
@@ -214,18 +214,22 @@ impl Module for Op {
 }
 
 #[derive(Default)]
-pub struct Oscillator {
-    midi_in: BufferInHandle<MidiEvents>,
-    pitch_shift: BufferInHandle<f32>,
-    vel_amt: BufferInHandle<f32>,
-    freq_mod: BufferInHandle<f32>,
-    signal_out: BufferOutHandle<f32>,
+struct OscillatorData {
     velocity: u8,
     semitone: f32,
     bend: f32,
     frequency: f32,
     wavetable: Vec<f32>,
     wavetable_index: f32,
+}
+
+pub struct Oscillator {
+    midi_in: BufferInHandle<MidiEvents>,
+    pitch_shift: BufferInHandle<f32>,
+    vel_amt: BufferInHandle<f32>,
+    freq_mod: BufferInHandle<f32>,
+    signal_out: BufferOutHandle<f32>,
+    data: OscillatorData,
 }
 
 impl Oscillator {
@@ -268,18 +272,20 @@ impl Module for Oscillator {
     fn init(settings: OscillatorSettings) -> BuiltModuleDescriptor<Self> {
         let mut desc = ModuleDescriptor::new();
         let module = Self {
-            midi_in: desc.with_buf_in::<MidiEvents>(),
-            pitch_shift: desc.with_buf_in_default::<f32>(1.0),
-            vel_amt: desc.with_buf_in_default::<f32>(0.0),
-            freq_mod: desc.with_buf_in_default::<f32>(0.0),
-            signal_out: desc.with_buf_out::<f32>(),
-            wavetable: match settings {
-                OscillatorSettings::Sine(table_len) => Self::sine(table_len),
-                OscillatorSettings::Saw(table_len) => Self::saw(table_len),
-                OscillatorSettings::Triangle(table_len) => Self::triangle(table_len),
-                OscillatorSettings::Square => Self::square(),
+            midi_in: desc.with_buf_in::<MidiEvents>("in"),
+            pitch_shift: desc.with_buf_in_default::<f32>("pitch_shift", 1.0),
+            vel_amt: desc.with_buf_in_default::<f32>("vel_amt", 0.0),
+            freq_mod: desc.with_buf_in_default::<f32>("freq_mod", 0.0),
+            signal_out: desc.with_buf_out::<f32>("out"),
+            data: OscillatorData {
+                wavetable: match settings {
+                    OscillatorSettings::Sine(table_len) => Self::sine(table_len),
+                    OscillatorSettings::Saw(table_len) => Self::saw(table_len),
+                    OscillatorSettings::Triangle(table_len) => Self::triangle(table_len),
+                    OscillatorSettings::Square => Self::square(),
+                },
+                ..Default::default()
             },
-            ..Default::default()
         };
         desc.build(module)
     }
@@ -299,13 +305,14 @@ impl Module for Oscillator {
                 if let MidiEvent::Midi { message, .. } = midi {
                     match message {
                         midly::MidiMessage::NoteOn { key, vel } => {
-                            self.velocity = vel.as_int();
-                            self.semitone = (key.as_int() as i16 - 69) as f32;
-                            self.wavetable_index = 0.0;
+                            self.data.velocity = vel.as_int();
+                            self.data.semitone = (key.as_int() as i16 - 69) as f32;
+                            self.data.wavetable_index = 0.0;
                             updated = true;
                         }
                         midly::MidiMessage::PitchBend { bend } => {
-                            self.bend = (bend.0.as_int() as i32 - 0x2000) as f32 / (0x2000 as f32);
+                            self.data.bend =
+                                (bend.0.as_int() as i32 - 0x2000) as f32 / (0x2000 as f32);
                             updated = true;
                         }
                         _ => (),
@@ -314,16 +321,17 @@ impl Module for Oscillator {
                 //println!("{}", _i);
             }
             if updated {
-                self.frequency = ((self.semitone + self.bend) / 12.0).exp2() * 440.0;
+                self.data.frequency = ((self.data.semitone + self.data.bend) / 12.0).exp2() * 440.0;
             }
 
-            *out = self.wavetable
-                [((self.wavetable_index + freq_mod) as usize).rem_euclid(self.wavetable.len())]
-                * (1.0 + vel_amt * ((self.velocity as f32 / 128.0) - 1.0));
+            *out = self.data.wavetable[((self.data.wavetable_index + freq_mod) as usize)
+                .rem_euclid(self.data.wavetable.len())]
+                * (1.0 + vel_amt * ((self.data.velocity as f32 / 128.0) - 1.0));
 
-            let table_len = self.wavetable.len() as f32;
-            self.wavetable_index += self.frequency * pitch_shift * SAMPLE_TIME * table_len;
-            self.wavetable_index = self.wavetable_index.rem_euclid(table_len as f32);
+            let table_len = self.data.wavetable.len() as f32;
+            self.data.wavetable_index +=
+                self.data.frequency * pitch_shift * SAMPLE_TIME * table_len;
+            self.data.wavetable_index = self.data.wavetable_index.rem_euclid(table_len as f32);
         }
     }
 }

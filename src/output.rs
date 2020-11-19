@@ -133,7 +133,7 @@ impl Module for AudioOutputModule {
     fn init(output: AudioOutput) -> BuiltModuleDescriptor<Self> {
         let mut desc = ModuleDescriptor::new();
         let module = Self {
-            signal_in: desc.with_buf_in::<f32>(),
+            signal_in: desc.with_buf_in::<f32>("in"),
             output,
         };
         desc.build(module)
