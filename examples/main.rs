@@ -19,6 +19,8 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    let start = std::time::Instant::now();
+
     let mut host = Host::new();
 
     host.create_module::<MidiInput>("midi", 0);
@@ -83,6 +85,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     host.link::<f32>("carrier_osc", "out", "carrier_envelope", "in");
 
     host.link::<f32>("carrier_envelope", "out", "audio_out", "in");
+
+    let dur = std::time::Instant::now().duration_since(start);
+    println!("Initialized in {}s", dur.as_secs_f64());
 
     host.process();
 }

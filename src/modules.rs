@@ -1,8 +1,8 @@
 use crate::{
     constants::*,
     host::{
-        BufferInHandle, BufferOutHandle, BuiltModuleDescriptor, Module, ModuleBuffersIn,
-        ModuleBuffersOut, ModuleDescriptor, ModuleTypes,
+        BufferHandle, BuiltModuleDescriptor, In, Module, ModuleBuffersIn, ModuleBuffersOut,
+        ModuleDescriptor, ModuleSettings, Out,
     },
     midi::{MidiEvent, MidiEvents},
 };
@@ -16,9 +16,9 @@ enum EnvelopeStage {
 }
 
 pub struct Envelope {
-    midi_in: BufferInHandle<MidiEvents>,
-    signal_in: BufferInHandle<f32>,
-    signal_out: BufferOutHandle<f32>,
+    midi_in: BufferHandle<In<MidiEvents>>,
+    signal_in: BufferHandle<In<f32>>,
+    signal_out: BufferHandle<Out<f32>>,
     settings: EnvelopeSettings,
     inv_attack: f32,
     inv_decay: f32,
@@ -36,13 +36,12 @@ pub struct EnvelopeSettings {
     pub release: f32,
 }
 
-impl ModuleTypes for Envelope {
+impl ModuleSettings for Envelope {
     type Settings = EnvelopeSettings;
 }
 
 impl Module for Envelope {
-    fn init(settings: EnvelopeSettings) -> BuiltModuleDescriptor<Self> {
-        let mut desc = ModuleDescriptor::new();
+    fn init(mut desc: ModuleDescriptor, settings: EnvelopeSettings) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             signal_in: desc.with_buf_in::<f32>("in"),
@@ -139,7 +138,7 @@ impl Module for Envelope {
 }
 
 pub struct Op {
-    signal_out: BufferOutHandle<f32>,
+    signal_out: BufferHandle<Out<f32>>,
     op: OpType,
 }
 
@@ -150,13 +149,12 @@ pub enum OpType {
     Negate,
 }
 
-impl ModuleTypes for Op {
+impl ModuleSettings for Op {
     type Settings = OpType;
 }
 
 impl Module for Op {
-    fn init(operation: OpType) -> BuiltModuleDescriptor<Self> {
-        let mut desc = ModuleDescriptor::new();
+    fn init(mut desc: ModuleDescriptor, operation: OpType) -> BuiltModuleDescriptor<Self> {
         match operation {
             OpType::Add(n) => {
                 for i in 0..n {
@@ -224,11 +222,11 @@ struct OscillatorData {
 }
 
 pub struct Oscillator {
-    midi_in: BufferInHandle<MidiEvents>,
-    pitch_shift: BufferInHandle<f32>,
-    vel_amt: BufferInHandle<f32>,
-    freq_mod: BufferInHandle<f32>,
-    signal_out: BufferOutHandle<f32>,
+    midi_in: BufferHandle<In<MidiEvents>>,
+    pitch_shift: BufferHandle<In<f32>>,
+    vel_amt: BufferHandle<In<f32>>,
+    freq_mod: BufferHandle<In<f32>>,
+    signal_out: BufferHandle<Out<f32>>,
     data: OscillatorData,
 }
 
@@ -264,13 +262,15 @@ pub enum OscillatorSettings {
     Square,
 }
 
-impl ModuleTypes for Oscillator {
+impl ModuleSettings for Oscillator {
     type Settings = OscillatorSettings;
 }
 
 impl Module for Oscillator {
-    fn init(settings: OscillatorSettings) -> BuiltModuleDescriptor<Self> {
-        let mut desc = ModuleDescriptor::new();
+    fn init(
+        mut desc: ModuleDescriptor,
+        settings: OscillatorSettings,
+    ) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             pitch_shift: desc.with_buf_in_default::<f32>("pitch_shift", 1.0),

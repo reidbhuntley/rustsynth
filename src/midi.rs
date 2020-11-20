@@ -9,8 +9,8 @@ use midly::num::*;
 use crate::{
     constants::*,
     host::{
-        BufferInHandle, BufferOutHandle, BuiltModuleDescriptor, Module, ModuleBuffersIn,
-        ModuleBuffersOut, ModuleDescriptor, ModuleTypes,
+        BufferHandle, BuiltModuleDescriptor, In, Module, ModuleBuffersIn, ModuleBuffersOut,
+        ModuleDescriptor, ModuleSettings, Out,
     },
 };
 
@@ -72,19 +72,19 @@ struct RawEvent {
 pub type MidiEvents = Vec<MidiEvent>;
 
 pub struct MidiInput {
-    buf_out: BufferOutHandle<MidiEvents>,
+    buf_out: BufferHandle<Out<MidiEvents>>,
     _conn_in: MidiInputConnection<()>,
     start_time: Instant,
     event_receiver: mpsc::Receiver<RawEvent>,
     event_queue: Vec<RawEvent>,
 }
 
-impl ModuleTypes for MidiInput {
+impl ModuleSettings for MidiInput {
     type Settings = usize;
 }
 
 impl Module for MidiInput {
-    fn init(port_idx: usize) -> BuiltModuleDescriptor<Self> {
+    fn init(mut desc: ModuleDescriptor, port_idx: usize) -> BuiltModuleDescriptor<Self> {
         let mut midi_in = MidirInput::new("midir reading input").unwrap();
         midi_in.ignore(Ignore::None);
 
@@ -108,7 +108,6 @@ impl Module for MidiInput {
             )
             .unwrap();
 
-        let mut desc = ModuleDescriptor::new();
         let module = Self {
             buf_out: desc.with_buf_out::<MidiEvents>("out"),
             _conn_in,
@@ -158,8 +157,8 @@ impl Module for MidiInput {
 }
 
 pub struct MidiSlider {
-    midi_in: BufferInHandle<MidiEvents>,
-    signal_out: BufferOutHandle<f32>,
+    midi_in: BufferHandle<In<MidiEvents>>,
+    signal_out: BufferHandle<Out<f32>>,
     settings: MidiSliderSettings,
     range: f32,
     current_val: f32,
@@ -172,13 +171,15 @@ pub struct MidiSliderSettings {
     pub max: f32,
 }
 
-impl ModuleTypes for MidiSlider {
+impl ModuleSettings for MidiSlider {
     type Settings = MidiSliderSettings;
 }
 
 impl Module for MidiSlider {
-    fn init(settings: MidiSliderSettings) -> BuiltModuleDescriptor<Self> {
-        let mut desc = ModuleDescriptor::new();
+    fn init(
+        mut desc: ModuleDescriptor,
+        settings: MidiSliderSettings,
+    ) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             signal_out: desc.with_buf_out::<f32>("out"),

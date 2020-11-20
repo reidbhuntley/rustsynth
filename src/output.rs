@@ -1,6 +1,8 @@
 use crate::{
     constants::*,
-    host::{Buffer, BufferInHandle, BuiltModuleDescriptor, Module, ModuleDescriptor, ModuleTypes},
+    host::{
+        Buffer, BufferHandle, BuiltModuleDescriptor, In, Module, ModuleDescriptor, ModuleSettings,
+    },
 };
 
 use std::sync::{Arc, Condvar, Mutex};
@@ -121,17 +123,16 @@ impl Source for AudioOutput {
 }
 
 pub(crate) struct AudioOutputModule {
-    signal_in: BufferInHandle<f32>,
+    signal_in: BufferHandle<In<f32>>,
     output: AudioOutput,
 }
 
-impl ModuleTypes for AudioOutputModule {
+impl ModuleSettings for AudioOutputModule {
     type Settings = AudioOutput;
 }
 
 impl Module for AudioOutputModule {
-    fn init(output: AudioOutput) -> BuiltModuleDescriptor<Self> {
-        let mut desc = ModuleDescriptor::new();
+    fn init(mut desc: ModuleDescriptor, output: AudioOutput) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             signal_in: desc.with_buf_in::<f32>("in"),
             output,

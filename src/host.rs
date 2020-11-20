@@ -6,7 +6,7 @@ use rodio::Source;
 use crate::{constants::*, midi::MidiEvents, output::AudioOutput, output::AudioOutputModule};
 
 use self::private::{
-    BufferInPort, FastHashMap, ModuleBufferInHandle, ModuleBufferOutHandle,
+    BufferInPort, BufferMarker, FastHashMap, ModuleBufferInHandle, ModuleBufferOutHandle,
     ModuleBuffersDescriptor, ModuleBuffersInInternal, ModuleBuffersOutInternal, ModuleHandle,
 };
 
@@ -19,10 +19,12 @@ pub trait BufferElem: 'static + private::BufferElemSealed + Default + Clone {
         std::iter::repeat(T::default()).take(len).collect()
     }
 }
-
 impl BufferElem for f32 {}
-
 impl BufferElem for MidiEvents {}
+
+pub trait BufferDir: private::BufferDirSealed {}
+impl<T: BufferElem> BufferDir for In<T> {}
+impl<T: BufferElem> BufferDir for Out<T> {}
 
 mod private {
     use std::{collections::HashMap, sync::atomic::AtomicUsize};
@@ -30,8 +32,8 @@ mod private {
     use seahash::SeaHasher;
 
     use super::{
-        BufferElem, BufferHandle, BufferInHandle, BufferOutHandle, BuffersInExt, BuffersOutExt,
-        ModuleBuffersIn, ModuleBuffersOut, ModuleDescriptor,
+        BufferDir, BufferElem, BufferHandle, BufferHandleRaw, BuffersInExt, BuffersOutExt, In,
+        ModuleBuffersIn, ModuleBuffersOut, ModuleDescriptor, Out, VariadicBufferHandle,
     };
 
     #[derive(Clone, Default)]
@@ -57,21 +59,23 @@ mod private {
     #[educe(Clone, Copy, PartialEq)]
     pub struct ModuleBufferInHandle<T: BufferElem> {
         pub module_handle: ModuleHandle,
-        pub buf_handle: BufferInHandle<T>,
+        pub buf_handle: BufferHandle<In<T>>,
     }
 
     #[derive(Educe, Eq)]
     #[educe(Clone, Copy, PartialEq)]
     pub struct ModuleBufferOutHandle<T: BufferElem> {
         pub module_handle: ModuleHandle,
-        pub buf_handle: BufferOutHandle<T>,
+        pub buf_handle: BufferHandle<Out<T>>,
     }
 
+    #[derive(Clone)]
     pub struct BufferOutPort<T: BufferElem> {
         pub buffer: super::Buffer<T>,
         pub dependents: Vec<ModuleBufferInHandle<T>>,
     }
 
+    #[derive(Clone)]
     pub enum BufferInPort<T: BufferElem> {
         OutBuffer(ModuleBufferOutHandle<T>),
         Constant(super::Buffer<T>),
@@ -89,120 +93,206 @@ mod private {
         }
     }
 
-    #[derive(Default)]
-    pub struct BufferInPorts<T: BufferElem> {
-        pub buffers: Vec<BufferInPort<T>>,
-        pub handles: FastHashMap<String, BufferInHandle<T>>,
+    enum VariadicMarked<T: BufferDir> {
+        Normal(BufferHandle<T>),
+        Variadic(VariadicBufferHandle<T>),
     }
 
-    impl<T: BufferElem> BufferInPorts<T> {
-        fn add_buffer(&mut self, buffer: BufferInPort<T>, name: &str) -> BufferInHandle<T> {
-            if !self.handles.contains_key(name) {
-                self.buffers.push(buffer);
-                let handle = BufferInHandle(BufferHandle::new(self.buffers.len() - 1));
-                self.handles.insert(name.to_owned(), handle);
-                handle
-            } else {
-                panic!()
+    pub struct BufferPorts<D: BufferDir> {
+        num_args: usize,
+        pub buffers: Vec<D::BufferPort>,
+        handles: FastHashMap<String, VariadicMarked<D>>,
+    }
+
+    impl<D: BufferDir> BufferPorts<D> {
+        fn new(descriptor: &ModuleDescriptor) -> Self {
+            let mut out = Self {
+                num_args: descriptor.num_args,
+                buffers: Default::default(),
+                handles: Default::default(),
+            };
+            for (marker, name, elem) in D::get_elems(descriptor).iter() {
+                out.add_buffer(*marker, D::create_port(elem), name);
             }
-        }
-    }
-
-    #[derive(Default)]
-    pub struct BufferOutPorts<T: BufferElem> {
-        pub buffers: Vec<BufferOutPort<T>>,
-        pub handles: FastHashMap<String, BufferOutHandle<T>>,
-    }
-
-    impl<T: BufferElem> BufferOutPorts<T> {
-        fn add_buffer(&mut self, buffer: BufferOutPort<T>, name: &str) -> BufferOutHandle<T> {
-            if !self.handles.contains_key(name) {
-                self.buffers.push(buffer);
-                let handle = BufferOutHandle(BufferHandle::new(self.buffers.len() - 1));
-                self.handles.insert(name.to_owned(), handle);
-                handle
-            } else {
-                panic!()
-            }
-        }
-    }
-
-    #[derive(Default, Clone)]
-    pub struct ModuleBuffersDescriptor<T: BufferElem> {
-        pub buf_in: Vec<(String, T)>,
-        pub buf_out: Vec<String>,
-    }
-
-    #[derive(Default)]
-    pub struct ModuleBuffersInInternal {
-        pub num_dependencies: usize,
-        pub num_finished_dependencies: AtomicUsize,
-        buf_signal: BufferInPorts<f32>,
-        buf_midi: BufferInPorts<crate::midi::MidiEvents>,
-    }
-
-    impl ModuleBuffersInInternal {
-        pub fn new(descriptors: &ModuleDescriptor) -> Self {
-            let mut out = Self::default();
-            out.add_num_buffers_all(&descriptors);
             out
         }
 
-        pub fn add_num_buffers_all(&mut self, descriptors: &ModuleDescriptor) {
-            Self::add_num_buffers(&mut self.buf_signal, &descriptors.buf_signal);
-            Self::add_num_buffers(&mut self.buf_midi, &descriptors.buf_midi);
+        pub fn get_buf(&self, handle: BufferHandle<D>) -> &D::BufferPort {
+            &self.buffers[handle.idx]
         }
 
-        pub fn add_num_buffers<T: BufferElem>(
-            buffers: &mut BufferInPorts<T>,
-            defaults: &ModuleBuffersDescriptor<T>,
-        ) {
-            for (name, default) in defaults.buf_in.iter() {
-                buffers.add_buffer(BufferInPort::with_constant(default.clone()), name);
+        pub fn get_buf_mut(&mut self, handle: BufferHandle<D>) -> &mut D::BufferPort {
+            &mut self.buffers[handle.idx]
+        }
+
+        pub fn get_handle(&self, name: &str) -> BufferHandle<D> {
+            match self.handles[name] {
+                VariadicMarked::Normal(handle) => handle,
+                VariadicMarked::Variadic(_) => panic!(),
             }
         }
-    }
 
-    #[derive(Default)]
-    pub struct ModuleBuffersOutInternal {
-        buf_signal: BufferOutPorts<f32>,
-        buf_midi: BufferOutPorts<crate::midi::MidiEvents>,
-    }
-
-    impl ModuleBuffersOutInternal {
-        pub fn new(descriptors: &ModuleDescriptor) -> Self {
-            let mut out = Self::default();
-            out.add_num_buffers_all(&descriptors);
-            out
+        pub fn get_variadic_handle(&self, name: &str) -> VariadicBufferHandle<D> {
+            match self.handles[name] {
+                VariadicMarked::Normal(_) => panic!(),
+                VariadicMarked::Variadic(handle) => handle,
+            }
         }
 
-        pub fn add_num_buffers_all(&mut self, descriptors: &ModuleDescriptor) {
-            Self::add_num_buffers(&mut self.buf_signal, &descriptors.buf_signal);
-            Self::add_num_buffers(&mut self.buf_midi, &descriptors.buf_midi);
-        }
-
-        pub fn add_num_buffers<T: BufferElem>(
-            buffers: &mut BufferOutPorts<T>,
-            descriptor: &ModuleBuffersDescriptor<T>,
-        ) {
-            for name in descriptor.buf_out.iter() {
-                buffers.add_buffer(
-                    BufferOutPort {
-                        buffer: T::new_buffer(T::default()),
-                        dependents: Vec::new(),
+        fn add_buffer(&mut self, marker: BufferMarker, port: D::BufferPort, name: &str) {
+            if self.handles.contains_key(name) {
+                panic!()
+            } else {
+                let handle = BufferHandle::new(self.buffers.len());
+                self.handles.insert(
+                    name.to_owned(),
+                    match marker {
+                        BufferMarker::Normal => {
+                            self.buffers.push(port.clone());
+                            VariadicMarked::Normal(handle)
+                        }
+                        BufferMarker::Variadic => {
+                            for _ in 0..self.num_args {
+                                self.buffers.push(port.clone());
+                            }
+                            VariadicMarked::Variadic(VariadicBufferHandle {
+                                num_args: self.num_args,
+                                buffer: handle,
+                            })
+                        }
                     },
-                    name,
                 );
             }
         }
     }
 
+    #[derive(Clone, Copy)]
+    pub enum BufferMarker {
+        Normal,
+        Variadic,
+    }
+
+    #[derive(Clone)]
+    pub struct ModuleBuffersDescriptor<T: BufferElem> {
+        num_args: usize,
+        next_idx_buf_in: BufferHandleRaw,
+        next_idx_buf_out: BufferHandleRaw,
+        pub buf_in: Vec<(BufferMarker, String, T)>,
+        pub buf_out: Vec<(BufferMarker, String, ())>,
+    }
+
+    impl<T: BufferElem> ModuleBuffersDescriptor<T> {
+        pub fn new(num_args: usize) -> Self {
+            Self {
+                num_args,
+                next_idx_buf_in: 0,
+                next_idx_buf_out: 0,
+                buf_in: Default::default(),
+                buf_out: Default::default(),
+            }
+        }
+
+        pub fn add_buf_in(&mut self, elem: (BufferMarker, String, T)) -> BufferHandleRaw {
+            let out = self.next_idx_buf_in;
+            self.next_idx_buf_in += match elem.0 {
+                BufferMarker::Normal => 1,
+                BufferMarker::Variadic => self.num_args,
+            };
+            self.buf_in.push(elem);
+            out
+        }
+
+        pub fn add_buf_out(&mut self, elem: (BufferMarker, String, ())) -> BufferHandleRaw {
+            let out = self.next_idx_buf_out;
+            self.next_idx_buf_out += match elem.0 {
+                BufferMarker::Normal => 1,
+                BufferMarker::Variadic => self.num_args,
+            };
+            self.buf_out.push(elem);
+            out
+        }
+    }
+
+    pub struct ModuleBuffersInInternal {
+        pub num_dependencies: usize,
+        pub num_finished_dependencies: AtomicUsize,
+        buf_signal: BufferPorts<In<f32>>,
+        buf_midi: BufferPorts<In<crate::midi::MidiEvents>>,
+    }
+
+    impl ModuleBuffersInInternal {
+        pub fn new(descriptors: &ModuleDescriptor) -> Self {
+            Self {
+                num_dependencies: 0,
+                num_finished_dependencies: AtomicUsize::new(0),
+                buf_signal: BufferPorts::new(&descriptors),
+                buf_midi: BufferPorts::new(&descriptors),
+            }
+        }
+    }
+
+    pub struct ModuleBuffersOutInternal {
+        buf_signal: BufferPorts<Out<f32>>,
+        buf_midi: BufferPorts<Out<crate::midi::MidiEvents>>,
+    }
+
+    impl ModuleBuffersOutInternal {
+        pub fn new(descriptors: &ModuleDescriptor) -> Self {
+            Self {
+                buf_signal: BufferPorts::new(&descriptors),
+                buf_midi: BufferPorts::new(&descriptors),
+            }
+        }
+    }
+
+    pub trait BufferDirSealed {
+        type DescriptorElem;
+        type BufferPort: Clone;
+        fn get_elems(
+            descriptor: &ModuleDescriptor,
+        ) -> &Vec<(BufferMarker, String, Self::DescriptorElem)>;
+        fn create_port(elem: &Self::DescriptorElem) -> Self::BufferPort;
+    }
+
+    impl<T: BufferElem> BufferDirSealed for In<T> {
+        type DescriptorElem = T;
+        type BufferPort = BufferInPort<T>;
+
+        fn get_elems(
+            descriptor: &ModuleDescriptor,
+        ) -> &Vec<(BufferMarker, String, Self::DescriptorElem)> {
+            &T::get_descriptor(descriptor).buf_in
+        }
+
+        fn create_port(elem: &Self::DescriptorElem) -> Self::BufferPort {
+            BufferInPort::with_constant(elem.clone())
+        }
+    }
+
+    impl<T: BufferElem> BufferDirSealed for Out<T> {
+        type DescriptorElem = ();
+        type BufferPort = BufferOutPort<T>;
+
+        fn get_elems(
+            descriptor: &ModuleDescriptor,
+        ) -> &Vec<(BufferMarker, String, Self::DescriptorElem)> {
+            &T::get_descriptor(descriptor).buf_out
+        }
+
+        fn create_port(_elem: &Self::DescriptorElem) -> Self::BufferPort {
+            BufferOutPort {
+                buffer: T::new_buffer(T::default()),
+                dependents: Vec::new(),
+            }
+        }
+    }
+
     pub trait BufferElemSealed {
-        fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferInPorts<Self>
+        fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferPorts<In<Self>>
         where
             Self: Sized + BufferElem;
 
-        fn get_buffers_in_mut(buf_in: &mut ModuleBuffersInInternal) -> &mut BufferInPorts<Self>
+        fn get_buffers_in_mut(buf_in: &mut ModuleBuffersInInternal) -> &mut BufferPorts<In<Self>>
         where
             Self: Sized + BufferElem;
 
@@ -210,11 +300,13 @@ mod private {
         where
             Self: Sized + BufferElem;
 
-        fn get_buffers_out(buf_out: &ModuleBuffersOutInternal) -> &BufferOutPorts<Self>
+        fn get_buffers_out(buf_out: &ModuleBuffersOutInternal) -> &BufferPorts<Out<Self>>
         where
             Self: Sized + BufferElem;
 
-        fn get_buffers_out_mut(buf_out: &mut ModuleBuffersOutInternal) -> &mut BufferOutPorts<Self>
+        fn get_buffers_out_mut(
+            buf_out: &mut ModuleBuffersOutInternal,
+        ) -> &mut BufferPorts<Out<Self>>
         where
             Self: Sized + BufferElem;
 
@@ -222,16 +314,22 @@ mod private {
         where
             Self: Sized + BufferElem;
 
-        fn get_descriptor(descriptors: &mut ModuleDescriptor) -> &mut ModuleBuffersDescriptor<Self>
+        fn get_descriptor(descriptors: &ModuleDescriptor) -> &ModuleBuffersDescriptor<Self>
+        where
+            Self: Sized + BufferElem;
+
+        fn get_descriptor_mut(
+            descriptors: &mut ModuleDescriptor,
+        ) -> &mut ModuleBuffersDescriptor<Self>
         where
             Self: Sized + BufferElem;
     }
     impl BufferElemSealed for f32 {
-        fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferInPorts<Self> {
+        fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferPorts<In<Self>> {
             &buf_in.buf_signal
         }
 
-        fn get_buffers_in_mut(buf_in: &mut ModuleBuffersInInternal) -> &mut BufferInPorts<Self> {
+        fn get_buffers_in_mut(buf_in: &mut ModuleBuffersInInternal) -> &mut BufferPorts<In<Self>> {
             &mut buf_in.buf_signal
         }
 
@@ -239,13 +337,13 @@ mod private {
             &buf_in.buf_signal
         }
 
-        fn get_buffers_out(buf_out: &ModuleBuffersOutInternal) -> &BufferOutPorts<Self> {
+        fn get_buffers_out(buf_out: &ModuleBuffersOutInternal) -> &BufferPorts<Out<Self>> {
             &buf_out.buf_signal
         }
 
         fn get_buffers_out_mut(
             buf_out: &mut ModuleBuffersOutInternal,
-        ) -> &mut BufferOutPorts<Self> {
+        ) -> &mut BufferPorts<Out<Self>> {
             &mut buf_out.buf_signal
         }
 
@@ -253,18 +351,22 @@ mod private {
             &buf_out.buf_signal
         }
 
-        fn get_descriptor(
+        fn get_descriptor_mut(
             descriptors: &mut ModuleDescriptor,
         ) -> &mut ModuleBuffersDescriptor<Self> {
             &mut descriptors.buf_signal
         }
+
+        fn get_descriptor(descriptors: &ModuleDescriptor) -> &ModuleBuffersDescriptor<Self> {
+            &descriptors.buf_signal
+        }
     }
     impl BufferElemSealed for crate::midi::MidiEvents {
-        fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferInPorts<Self> {
+        fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferPorts<In<Self>> {
             &buf_in.buf_midi
         }
 
-        fn get_buffers_in_mut(buf_in: &mut ModuleBuffersInInternal) -> &mut BufferInPorts<Self> {
+        fn get_buffers_in_mut(buf_in: &mut ModuleBuffersInInternal) -> &mut BufferPorts<In<Self>> {
             &mut buf_in.buf_midi
         }
 
@@ -272,13 +374,13 @@ mod private {
             &buf_in.buf_midi
         }
 
-        fn get_buffers_out(buf_out: &ModuleBuffersOutInternal) -> &BufferOutPorts<Self> {
+        fn get_buffers_out(buf_out: &ModuleBuffersOutInternal) -> &BufferPorts<Out<Self>> {
             &buf_out.buf_midi
         }
 
         fn get_buffers_out_mut(
             buf_out: &mut ModuleBuffersOutInternal,
-        ) -> &mut BufferOutPorts<Self> {
+        ) -> &mut BufferPorts<Out<Self>> {
             &mut buf_out.buf_midi
         }
 
@@ -286,10 +388,14 @@ mod private {
             &buf_out.buf_midi
         }
 
-        fn get_descriptor(
+        fn get_descriptor_mut(
             descriptors: &mut ModuleDescriptor,
         ) -> &mut ModuleBuffersDescriptor<Self> {
             &mut descriptors.buf_midi
+        }
+
+        fn get_descriptor(descriptors: &ModuleDescriptor) -> &ModuleBuffersDescriptor<Self> {
+            &descriptors.buf_midi
         }
     }
 }
@@ -298,21 +404,22 @@ pub type Buffer<T> = [T; BUFFER_LEN];
 
 type BufferHandleRaw = usize;
 
-#[derive(Clone, Eq)]
-struct BufferHandle<T: BufferElem> {
+#[derive(Educe, Eq)]
+#[educe(Clone, Copy, PartialEq)]
+pub struct In<T: BufferElem>(std::marker::PhantomData<T>);
+
+#[derive(Educe, Eq)]
+#[educe(Clone, Copy, PartialEq)]
+pub struct Out<T: BufferElem>(std::marker::PhantomData<T>);
+
+#[derive(Educe, Eq)]
+#[educe(Clone, Copy, PartialEq)]
+pub struct BufferHandle<T: BufferDir> {
     _marker: std::marker::PhantomData<T>,
     idx: BufferHandleRaw,
 }
 
-impl<T: BufferElem> PartialEq for BufferHandle<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.idx == other.idx
-    }
-}
-
-impl<T: BufferElem> Copy for BufferHandle<T> {}
-
-impl<T: BufferElem> BufferHandle<T> {
+impl<T: BufferDir> BufferHandle<T> {
     fn new(idx: BufferHandleRaw) -> Self {
         Self {
             idx,
@@ -323,13 +430,22 @@ impl<T: BufferElem> BufferHandle<T> {
 
 #[derive(Educe, Eq)]
 #[educe(Clone, Copy, PartialEq)]
-pub struct BufferInHandle<T: BufferElem>(BufferHandle<T>);
-#[derive(Educe, Eq)]
-#[educe(Clone, Copy, PartialEq)]
-pub struct BufferOutHandle<T: BufferElem>(BufferHandle<T>);
+pub struct VariadicBufferHandle<T: BufferDir> {
+    num_args: usize,
+    buffer: BufferHandle<T>,
+}
 
-#[derive(Default, Clone)]
+impl<T: BufferDir> VariadicBufferHandle<T> {
+    pub fn at(&self, idx: usize) -> BufferHandle<T> {
+        if idx >= self.num_args {
+            panic!()
+        }
+        BufferHandle::<T>::new(self.buffer.idx + idx)
+    }
+}
+
 pub struct ModuleDescriptor {
+    num_args: usize,
     buf_signal: ModuleBuffersDescriptor<f32>,
     buf_midi: ModuleBuffersDescriptor<MidiEvents>,
 }
@@ -340,8 +456,12 @@ pub struct BuiltModuleDescriptor<T: Module> {
 }
 
 impl ModuleDescriptor {
-    pub fn new() -> Self {
-        Default::default()
+    fn new(num_args: usize) -> Self {
+        Self {
+            num_args,
+            buf_signal: ModuleBuffersDescriptor::new(num_args),
+            buf_midi: ModuleBuffersDescriptor::new(num_args),
+        }
     }
 
     pub fn build<T: Module>(self, initial_data: T) -> BuiltModuleDescriptor<T> {
@@ -355,20 +475,60 @@ impl ModuleDescriptor {
         &mut self,
         name: &str,
         default: E,
-    ) -> BufferInHandle<E> {
-        let buffers_in = &mut E::get_descriptor(self).buf_in;
-        buffers_in.push((name.to_owned(), default));
-        BufferInHandle(BufferHandle::new(buffers_in.len() - 1))
+    ) -> BufferHandle<In<E>> {
+        BufferHandle::new(E::get_descriptor_mut(self).add_buf_in((
+            BufferMarker::Normal,
+            name.to_owned(),
+            default,
+        )))
     }
 
-    pub fn with_buf_in<E: BufferElem>(&mut self, name: &str) -> BufferInHandle<E> {
-        self.with_buf_in_default::<E>(name, Default::default())
+    pub fn with_buf_in<E: BufferElem>(&mut self, name: &str) -> BufferHandle<In<E>> {
+        self.with_buf_in_default(name, E::default())
     }
 
-    pub fn with_buf_out<E: BufferElem>(&mut self, name: &str) -> BufferOutHandle<E> {
-        let buffers_out = &mut E::get_descriptor(self).buf_out;
-        buffers_out.push(name.to_owned());
-        BufferOutHandle(BufferHandle::new(buffers_out.len() - 1))
+    pub fn with_buf_out<E: BufferElem>(&mut self, name: &str) -> BufferHandle<Out<E>> {
+        BufferHandle::new(E::get_descriptor_mut(self).add_buf_out((
+            BufferMarker::Normal,
+            name.to_owned(),
+            (),
+        )))
+    }
+
+    pub fn with_variadic_buf_in_default<E: BufferElem>(
+        &mut self,
+        name: &str,
+        default: E,
+    ) -> VariadicBufferHandle<In<E>> {
+        VariadicBufferHandle {
+            num_args: self.num_args,
+            buffer: BufferHandle::new(E::get_descriptor_mut(self).add_buf_in((
+                BufferMarker::Variadic,
+                name.to_owned(),
+                default,
+            ))),
+        }
+    }
+
+    pub fn with_variadic_buf_in<E: BufferElem>(
+        &mut self,
+        name: &str,
+    ) -> VariadicBufferHandle<In<E>> {
+        self.with_variadic_buf_in_default(name, E::default())
+    }
+
+    pub fn with_variadic_buf_out<E: BufferElem>(
+        &mut self,
+        name: &str,
+    ) -> VariadicBufferHandle<Out<E>> {
+        VariadicBufferHandle {
+            num_args: self.num_args,
+            buffer: BufferHandle::new(E::get_descriptor_mut(self).add_buf_out((
+                BufferMarker::Variadic,
+                name.to_owned(),
+                (),
+            ))),
+        }
     }
 }
 
@@ -380,8 +540,8 @@ pub struct ModuleBuffersIn {
 }
 
 impl ModuleBuffersIn {
-    pub fn get<T: BufferElem>(&self, buffer: BufferInHandle<T>) -> &Buffer<T> {
-        let bufs = T::get_ext_buffers_in(&self)[buffer.0.idx];
+    pub fn get<T: BufferElem>(&self, buffer: BufferHandle<In<T>>) -> &Buffer<T> {
+        let bufs = T::get_ext_buffers_in(&self)[buffer.idx];
         unsafe { &*bufs }
     }
 
@@ -400,8 +560,8 @@ pub struct ModuleBuffersOut {
 }
 
 impl ModuleBuffersOut {
-    pub fn get<T: BufferElem>(&mut self, buffer: BufferOutHandle<T>) -> &mut Buffer<T> {
-        let bufs = T::get_ext_buffers_out(&self)[buffer.0.idx];
+    pub fn get<T: BufferElem>(&mut self, buffer: BufferHandle<Out<T>>) -> &mut Buffer<T> {
+        let bufs = T::get_ext_buffers_out(&self)[buffer.idx];
         unsafe { &mut *bufs }
     }
 
@@ -412,28 +572,30 @@ impl ModuleBuffersOut {
     }
 }
 
-pub trait ModuleTypes {
+pub trait ModuleSettings {
     type Settings;
 }
 
 pub trait Module: 'static + Any {
-    fn init(settings: Self::Settings) -> BuiltModuleDescriptor<Self>
+    fn init(descriptor: ModuleDescriptor, settings: Self::Settings) -> BuiltModuleDescriptor<Self>
     where
-        Self: Sized + ModuleTypes;
+        Self: Sized + ModuleSettings;
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut);
 }
 
 struct ModuleInternals {
     module: Box<dyn Module>,
+    num_args: usize,
     buf_in: ModuleBuffersInInternal,
     buf_out: ModuleBuffersOutInternal,
 }
 
 impl ModuleInternals {
-    fn new<T: Module + ModuleTypes>(settings: T::Settings) -> Self {
-        let descriptor = T::init(settings);
+    fn new<T: Module + ModuleSettings>(settings: T::Settings, num_args: usize) -> Self {
+        let descriptor = T::init(ModuleDescriptor::new(num_args), settings);
         Self {
             module: descriptor.initial_data,
+            num_args,
             buf_in: ModuleBuffersInInternal::new(&descriptor.buffers_descriptors),
             buf_out: ModuleBuffersOutInternal::new(&descriptor.buffers_descriptors),
         }
@@ -462,15 +624,24 @@ impl Host {
         out
     }
 
-    pub fn create_module<T: Module + ModuleTypes>(&mut self, name: &str, settings: T::Settings) {
+    pub fn create_variadic_module<T: Module + ModuleSettings>(
+        &mut self,
+        name: &str,
+        settings: T::Settings,
+        num_args: usize,
+    ) {
         if self.handles.contains_key(name) {
             panic!()
         }
-        let module = ModuleInternals::new::<T>(settings);
+        let module = ModuleInternals::new::<T>(settings, num_args);
         let idx = self.next_idx;
         self.next_idx += 1;
         self.modules.insert(idx, module);
         self.handles.insert(name.to_owned(), ModuleHandle { idx });
+    }
+
+    pub fn create_module<T: Module + ModuleSettings>(&mut self, name: &str, settings: T::Settings) {
+        self.create_variadic_module::<T>(name, settings, 0)
     }
 
     fn set_buffer_in<T: BufferElem>(
@@ -483,7 +654,7 @@ impl Host {
             .get_mut(&port_handle.module_handle.idx)
             .unwrap();
 
-        let port = &T::get_buffers_in(&module_in.buf_in).buffers[port_handle.buf_handle.0.idx];
+        let port = &T::get_buffers_in(&module_in.buf_in).get_buf(port_handle.buf_handle);
         let (old_out, new_out) = match port {
             BufferInPort::OutBuffer(out) => (
                 Some(out.clone()),
@@ -507,18 +678,20 @@ impl Host {
             ),
         };
 
-        T::get_buffers_in_mut(&mut module_in.buf_in).buffers[port_handle.buf_handle.0.idx] = new;
+        *T::get_buffers_in_mut(&mut module_in.buf_in).get_buf_mut(port_handle.buf_handle) = new;
 
         if let Some(old_out) = old_out {
             let module_out = self.modules.get_mut(&old_out.module_handle.idx).unwrap();
-            T::get_buffers_out_mut(&mut module_out.buf_out).buffers[old_out.buf_handle.0.idx]
+            T::get_buffers_out_mut(&mut module_out.buf_out)
+                .get_buf_mut(old_out.buf_handle)
                 .dependents
                 .retain(|d| d != &port_handle);
         }
 
         if let Some(new_out) = new_out {
             let module_out = self.modules.get_mut(&new_out.module_handle.idx).unwrap();
-            T::get_buffers_out_mut(&mut module_out.buf_out).buffers[new_out.buf_handle.0.idx]
+            T::get_buffers_out_mut(&mut module_out.buf_out)
+                .get_buf_mut(new_out.buf_handle)
                 .dependents
                 .push(port_handle);
         }
@@ -534,15 +707,15 @@ impl Host {
         let handle_out = self.handles[module_out];
         let buf_out = ModuleBufferOutHandle {
             module_handle: handle_out,
-            buf_handle: T::get_buffers_out(&self.modules[&handle_out.idx].buf_out).handles
-                [buf_name_out],
+            buf_handle: T::get_buffers_out(&self.modules[&handle_out.idx].buf_out)
+                .get_handle(buf_name_out),
         };
 
         let handle_in = self.handles[module_in];
         let buf_in = ModuleBufferInHandle {
             module_handle: handle_in,
-            buf_handle: T::get_buffers_in(&self.modules[&handle_in.idx].buf_in).handles
-                [buf_name_in],
+            buf_handle: T::get_buffers_in(&self.modules[&handle_in.idx].buf_in)
+                .get_handle(buf_name_in),
         };
 
         self.set_buffer_in(buf_in, BufferInPort::OutBuffer(buf_out));
@@ -552,8 +725,8 @@ impl Host {
         let handle_in = self.handles[module_in];
         let buf_in = ModuleBufferInHandle {
             module_handle: handle_in,
-            buf_handle: T::get_buffers_in(&self.modules[&handle_in.idx].buf_in).handles
-                [buf_name_in],
+            buf_handle: T::get_buffers_in(&self.modules[&handle_in.idx].buf_in)
+                .get_handle(buf_name_in),
         };
 
         self.set_buffer_in(buf_in, BufferInPort::with_constant(value));
@@ -580,7 +753,7 @@ impl Host {
                         host.set_buffer_in(
                             ModuleBufferInHandle {
                                 module_handle: module_handle.clone(),
-                                buf_handle: BufferInHandle(BufferHandle::new(port_idx)),
+                                buf_handle: BufferHandle::new(port_idx),
                             },
                             BufferInPort::<T>::default(),
                         );
@@ -657,8 +830,9 @@ impl Host {
                 .map(|port| match port {
                     BufferInPort::OutBuffer(handle) => {
                         let buf_out = &host.modules.get(&handle.module_handle.idx).unwrap().buf_out;
-                        &T::get_buffers_out(buf_out).buffers[handle.buf_handle.0.idx].buffer
-                            as *const _
+                        &T::get_buffers_out(buf_out)
+                            .get_buf(handle.buf_handle)
+                            .buffer as *const _
                     }
                     BufferInPort::Constant(buf) => buf,
                 })
