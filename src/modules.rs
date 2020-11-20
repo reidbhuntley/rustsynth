@@ -2,7 +2,7 @@ use crate::{
     constants::*,
     host::{
         BufferHandle, BuiltModuleDescriptor, In, Module, ModuleBuffersIn, ModuleBuffersOut,
-        ModuleDescriptor, ModuleSettings, Out,
+        ModuleDescriptor, ModuleSettings, Out, VariadicBufferHandle,
     },
     midi::{MidiEvent, MidiEvents},
 };
@@ -138,14 +138,15 @@ impl Module for Envelope {
 }
 
 pub struct Op {
+    signal_in: VariadicBufferHandle<In<f32>>,
     signal_out: BufferHandle<Out<f32>>,
     op: OpType,
 }
 
 #[derive(Clone, Copy)]
 pub enum OpType {
-    Add(usize),
-    Multiply(usize),
+    Add,
+    Multiply,
     Negate,
 }
 
@@ -155,24 +156,15 @@ impl ModuleSettings for Op {
 
 impl Module for Op {
     fn init(mut desc: ModuleDescriptor, operation: OpType) -> BuiltModuleDescriptor<Self> {
-        match operation {
-            OpType::Add(n) => {
-                for i in 0..n {
-                    desc.with_buf_in_default::<f32>(&i.to_string(), 0.0);
-                }
-            }
-            OpType::Multiply(n) => {
-                for i in 0..n {
-                    desc.with_buf_in_default::<f32>(&i.to_string(), 1.0);
-                }
-            }
-            OpType::Negate => {
-                desc.with_buf_in_default::<f32>("0", 0.0);
-            }
-        }
-
         let module = Self {
             op: operation,
+            signal_in: desc.with_variadic_buf_in_default(
+                "in",
+                match operation {
+                    OpType::Multiply => 1.0,
+                    _ => 0.0,
+                },
+            ),
             signal_out: desc.with_buf_out::<f32>("out"),
         };
         desc.build(module)
@@ -181,30 +173,34 @@ impl Module for Op {
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
         let signal_out = buffers_out.get(self.signal_out);
         match self.op {
-            OpType::Add(_) => {
+            OpType::Add => {
                 for val_out in signal_out.iter_mut() {
                     *val_out = 0.0;
                 }
-                for buf_in in buffers_in.iter() {
+                for buf_in in buffers_in.get_iter(self.signal_in) {
                     for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
                         *val_out += val_in;
                     }
                 }
             }
-            OpType::Multiply(_) => {
+            OpType::Multiply => {
                 for val_out in signal_out.iter_mut() {
                     *val_out = 1.0;
                 }
-                for buf_in in buffers_in.iter() {
+                for buf_in in buffers_in.get_iter(self.signal_in) {
                     for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
                         *val_out *= val_in;
                     }
                 }
             }
             OpType::Negate => {
-                let buf_in = buffers_in.iter::<f32>().next().unwrap();
-                for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
-                    *val_out = -val_in;
+                for val_out in signal_out.iter_mut() {
+                    *val_out = 0.0;
+                }
+                for buf_in in buffers_in.get_iter(self.signal_in) {
+                    for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
+                        *val_out -= val_in;
+                    }
                 }
             }
         }

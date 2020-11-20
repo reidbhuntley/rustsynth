@@ -23,9 +23,9 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let mut host = Host::new();
 
-    host.create_module::<MidiInput>("midi", 0);
+    let midi = host.create_module::<MidiInput>("midi", 0);
 
-    host.create_module::<MidiSlider>(
+    let fmod_pitch_slider = host.create_module::<MidiSlider>(
         "fmod_pitch_slider",
         MidiSliderSettings {
             controller: 41,
@@ -34,9 +34,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             max: 4.0,
         },
     );
-    host.link::<MidiEvents>("midi", "out", "fmod_pitch_slider", "in");
+    host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(fmod_pitch_slider, "in"));
 
-    host.create_module::<MidiSlider>(
+    let fmod_vol_slider = host.create_module::<MidiSlider>(
         "fmod_vol_slider",
         MidiSliderSettings {
             controller: 42,
@@ -45,13 +45,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             max: 128.0,
         },
     );
-    host.link::<MidiEvents>("midi", "out", "fmod_vol_slider", "in");
+    host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(fmod_vol_slider, "in"));
 
-    host.create_module::<Oscillator>("fmod_osc", OscillatorSettings::Square);
-    host.link::<MidiEvents>("midi", "out", "fmod_osc", "in");
-    host.link::<f32>("fmod_pitch_slider", "out", "fmod_osc", "pitch_shift");
+    let fmod_osc = host.create_module::<Oscillator>("fmod_osc", OscillatorSettings::Square);
+    host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(fmod_osc, "in"));
+    host.link::<f32>(
+        host.buf(fmod_pitch_slider, "out"),
+        host.buf(fmod_osc, "pitch_shift"),
+    );
 
-    host.create_module::<Envelope>(
+    let fmod_envelope = host.create_module::<Envelope>(
         "fmod_envelope",
         EnvelopeSettings {
             attack: 0.0,
@@ -60,19 +63,26 @@ fn run() -> Result<(), Box<dyn Error>> {
             release: 0.2,
         },
     );
-    host.link::<MidiEvents>("midi", "out", "fmod_envelope", "in");
-    host.link::<f32>("fmod_osc", "out", "fmod_envelope", "in");
+    host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(fmod_envelope, "in"));
+    host.link::<f32>(host.buf(fmod_osc, "out"), host.buf(fmod_envelope, "in"));
 
-    host.create_module::<Op>("fmod_amp", OpType::Multiply(2));
-    host.link::<f32>("fmod_envelope", "out", "fmod_amp", "0");
-    host.link::<f32>("fmod_vol_slider", "out", "fmod_amp", "1");
+    let fmod_amp = host.create_variadic_module::<Op>("fmod_amp", OpType::Multiply, 2);
+    host.link::<f32>(
+        host.buf(fmod_envelope, "out"),
+        host.variadic_buf(fmod_amp, "in").at(0),
+    );
+    host.link::<f32>(
+        host.buf(fmod_vol_slider, "out"),
+        host.variadic_buf(fmod_amp, "in").at(1),
+    );
 
-    host.create_module::<Oscillator>("carrier_osc", OscillatorSettings::Sine(1024));
-    host.link::<MidiEvents>("midi", "out", "carrier_osc", "in");
-    host.link_value::<f32>(0.2, "carrier_osc", "vel_amt");
-    host.link::<f32>("fmod_amp", "out", "carrier_osc", "freq_mod");
+    let carrier_osc =
+        host.create_module::<Oscillator>("carrier_osc", OscillatorSettings::Sine(1024));
+    host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(carrier_osc, "in"));
+    host.link_value::<f32>(0.2, host.buf(carrier_osc, "vel_amt"));
+    host.link::<f32>(host.buf(fmod_amp, "out"), host.buf(carrier_osc, "freq_mod"));
 
-    host.create_module::<Envelope>(
+    let carrier_envelope = host.create_module::<Envelope>(
         "carrier_envelope",
         EnvelopeSettings {
             attack: 0.0,
@@ -81,10 +91,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             release: 0.6,
         },
     );
-    host.link::<MidiEvents>("midi", "out", "carrier_envelope", "in");
-    host.link::<f32>("carrier_osc", "out", "carrier_envelope", "in");
+    host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(carrier_envelope, "in"));
+    host.link::<f32>(
+        host.buf(carrier_osc, "out"),
+        host.buf(carrier_envelope, "in"),
+    );
 
-    host.link::<f32>("carrier_envelope", "out", "audio_out", "in");
+    host.link::<f32>(
+        host.buf(carrier_envelope, "out"),
+        host.buf(host.get_output_module(), "in"),
+    );
 
     let dur = std::time::Instant::now().duration_since(start);
     println!("Initialized in {}s", dur.as_secs_f64());
