@@ -6,7 +6,13 @@ use midly::live::LiveEvent as MLiveEvent;
 use midly::live::SystemCommon as MSysCom;
 use midly::num::*;
 
-use crate::{constants::*, host::{BufferHandle, BuiltModuleDescriptor, In, Module, ModuleBuffersIn, ModuleBuffersOut, ModuleDescriptor, ModuleSettings, Out, VariadicBufferHandle}};
+use crate::{
+    constants::*,
+    host::{
+        BufferHandle, BuiltModuleDescriptor, In, Module, ModuleBuffersIn, ModuleBuffersOut,
+        ModuleDescriptor, ModuleSettings, Out, VariadicBufferHandle,
+    },
+};
 
 #[derive(Debug, Clone)]
 pub enum MidiEvent {
@@ -174,7 +180,7 @@ impl Module for MidiSlider {
     fn init(
         mut desc: ModuleDescriptor,
         settings: MidiSliderSettings,
-        _: usize
+        _: usize,
     ) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
@@ -219,8 +225,7 @@ pub struct MidiPoly {
     notes: Vec<(u8, MidiEvent)>,
     midi_in: BufferHandle<In<MidiEvents>>,
     midi_out: Vec<BufferHandle<Out<MidiEvents>>>,
-    midi_out_variadic: VariadicBufferHandle<Out<MidiEvents>>
-    
+    midi_out_variadic: VariadicBufferHandle<Out<MidiEvents>>,
 }
 
 impl ModuleSettings for MidiPoly {
@@ -228,14 +233,18 @@ impl ModuleSettings for MidiPoly {
 }
 
 impl Module for MidiPoly {
-    fn init(mut desc: ModuleDescriptor, _settings: (), num_ports: usize) -> BuiltModuleDescriptor<Self> {
+    fn init(
+        mut desc: ModuleDescriptor,
+        _settings: (),
+        num_ports: usize,
+    ) -> BuiltModuleDescriptor<Self> {
         let midi_out = desc.with_variadic_buf_out::<MidiEvents>("out");
         let module = Self {
             num_ports,
             notes: Default::default(),
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             midi_out: midi_out.iter().collect(),
-            midi_out_variadic: midi_out
+            midi_out_variadic: midi_out,
         };
         desc.build(module)
     }
@@ -258,7 +267,9 @@ impl Module for MidiPoly {
                         midly::MidiMessage::NoteOn { key, .. } => {
                             let key = key.as_int();
                             if self.notes.iter().all(|(n, _)| *n != key) {
-                                let free_buf = self.midi_out.remove(self.notes.len().min(self.num_ports - 1));
+                                let free_buf = self
+                                    .midi_out
+                                    .remove(self.notes.len().min(self.num_ports - 1));
                                 buffers_out.get(free_buf)[i].push(event.clone());
                                 self.midi_out.insert(0, free_buf);
                                 self.notes.insert(0, (key, event.clone()));
@@ -272,18 +283,24 @@ impl Module for MidiPoly {
                                     if idx < self.num_ports {
                                         let old_buf = self.midi_out.remove(idx);
                                         self.midi_out.push(old_buf);
-                                        buffers_out.get(old_buf)[i].push(if let Some((_, on_event)) = self.notes.get(self.num_ports - 1) {
-                                            on_event.clone()
-                                        } else {
-                                            event.clone()
-                                        });
+                                        buffers_out.get(old_buf)[i].push(
+                                            if let Some((_, on_event)) =
+                                                self.notes.get(self.num_ports - 1)
+                                            {
+                                                on_event.clone()
+                                            } else {
+                                                event.clone()
+                                            },
+                                        );
                                     }
                                 }
                                 None => {}
                             }
                         }
-                        _ => for buf_out in buffers_out.get_iter(self.midi_out_variadic) {
-                            buf_out[i].push(event.clone())
+                        _ => {
+                            for buf_out in buffers_out.get_iter(self.midi_out_variadic) {
+                                buf_out[i].push(event.clone())
+                            }
                         }
                     }
                 }

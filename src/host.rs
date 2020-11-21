@@ -636,7 +636,11 @@ pub trait ModuleSettings {
 }
 
 pub trait Module: 'static + Any {
-    fn init(descriptor: ModuleDescriptor, settings: Self::Settings, num_variadic_args: usize) -> BuiltModuleDescriptor<Self>
+    fn init(
+        descriptor: ModuleDescriptor,
+        settings: Self::Settings,
+        num_variadic_args: usize,
+    ) -> BuiltModuleDescriptor<Self>
     where
         Self: Sized + ModuleSettings;
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut);
@@ -804,7 +808,11 @@ impl Host {
         }
     }
 
-    pub fn link_group_ext<T: BufferElem>(&mut self, buf_out: ModuleBufferHandle<Out<T>>, buf_in: &GroupBufferHandle<In<T>>) {
+    pub fn link_group_ext<T: BufferElem>(
+        &mut self,
+        buf_out: ModuleBufferHandle<Out<T>>,
+        buf_in: &GroupBufferHandle<In<T>>,
+    ) {
         for &handle_in in buf_in.handles.iter() {
             self.link(buf_out, handle_in);
         }
@@ -1171,7 +1179,7 @@ pub struct GroupVariadicBufferHandle<T: BufferDir> {
 impl<T: BufferDir> GroupVariadicBufferHandle<T> {
     pub fn at(&self, idx: usize) -> GroupBufferHandle<T> {
         GroupBufferHandle {
-            handles: self.handles.iter().map(|h| h.at(idx)).collect()
+            handles: self.handles.iter().map(|h| h.at(idx)).collect(),
         }
     }
 }

@@ -1,4 +1,14 @@
-use rustsynth::{host::{GroupDescriptor, Host}, midi::MidiEvents, midi::MidiInput, midi::MidiPoly, midi::MidiSlider, midi::MidiSliderSettings, modules::Envelope, modules::EnvelopeSettings, modules::{Op, OpType, Oscillator, OscillatorSettings}};
+use rustsynth::{
+    host::{GroupDescriptor, Host},
+    midi::MidiEvents,
+    midi::MidiInput,
+    midi::MidiPoly,
+    midi::MidiSlider,
+    midi::MidiSliderSettings,
+    modules::Envelope,
+    modules::EnvelopeSettings,
+    modules::{Op, OpType, Oscillator, OscillatorSettings},
+};
 
 use std::error::Error;
 
@@ -22,7 +32,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             controller: 41,
             default: 1.0,
             min: 0.0,
-            max: 4.0,
+            max: 8.0,
         },
     );
     host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(fmod_pitch_slider, "in"));
@@ -59,7 +69,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         },
     );
     host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(carrier_rel_slider, "in"));
-    
+
+    let carrier_vol_slider = host.create_module::<MidiSlider>(
+        "carrier_vol_slider",
+        MidiSliderSettings {
+            controller: 7,
+            default: 0.5,
+            min: 0.0,
+            max: 1.0,
+        },
+    );
+    host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(carrier_vol_slider, "in"));
+
     let mut group_desc = GroupDescriptor::new();
     group_desc.with_anonymous_instances(16);
     let group = host.create_group("group", group_desc);
@@ -67,8 +88,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     let voices = host.create_group_joining_module::<MidiPoly>(group, "voices", ());
     host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(voices.ungrouped(), "in"));
 
-    let fmod_osc = host.create_group_instance_module::<Oscillator>(group, "fmod_osc", &OscillatorSettings::Saw(1024));
-    host.link_group::<MidiEvents>(&host.group_joining_buf(voices, "out"), &host.group_instance_buf(&fmod_osc, "in"));
+    let fmod_osc = host.create_group_instance_module::<Oscillator>(
+        group,
+        "fmod_osc",
+        &OscillatorSettings::Square,
+    );
+    host.link_group::<MidiEvents>(
+        &host.group_joining_buf(voices, "out"),
+        &host.group_instance_buf(&fmod_osc, "in"),
+    );
     host.link_group_ext::<f32>(
         host.buf(fmod_pitch_slider, "out"),
         &host.group_instance_buf(&fmod_osc, "pitch_shift"),
@@ -84,12 +112,25 @@ fn run() -> Result<(), Box<dyn Error>> {
             release: 0.2,
         },
     );
-    host.link_group::<MidiEvents>(&host.group_joining_buf(voices, "out"),  &host.group_instance_buf(&fmod_envelope, "in"));
-    host.link_group_ext::<f32>(host.buf(carrier_atk_slider, "out"), &host.group_instance_buf(&fmod_envelope, "attack"));
-    host.link_group_ext::<f32>(host.buf(carrier_rel_slider, "out"), &host.group_instance_buf(&fmod_envelope, "release"));
-    host.link_group::<f32>(&host.group_instance_buf(&fmod_osc, "out"), &host.group_instance_buf(&fmod_envelope, "in"));
+    host.link_group::<MidiEvents>(
+        &host.group_joining_buf(voices, "out"),
+        &host.group_instance_buf(&fmod_envelope, "in"),
+    );
+    host.link_group_ext::<f32>(
+        host.buf(carrier_atk_slider, "out"),
+        &host.group_instance_buf(&fmod_envelope, "attack"),
+    );
+    host.link_group_ext::<f32>(
+        host.buf(carrier_rel_slider, "out"),
+        &host.group_instance_buf(&fmod_envelope, "release"),
+    );
+    host.link_group::<f32>(
+        &host.group_instance_buf(&fmod_osc, "out"),
+        &host.group_instance_buf(&fmod_envelope, "in"),
+    );
 
-    let fmod_amp = host.create_group_instance_variadic_module::<Op>(group, "fmod_amp", &OpType::Multiply, 2);
+    let fmod_amp =
+        host.create_group_instance_variadic_module::<Op>(group, "fmod_amp", &OpType::Multiply, 2);
     host.link_group::<f32>(
         &host.group_instance_buf(&fmod_envelope, "out"),
         &host.group_instance_variadic_buf(&fmod_amp, "in").at(0),
@@ -99,11 +140,20 @@ fn run() -> Result<(), Box<dyn Error>> {
         &host.group_instance_variadic_buf(&fmod_amp, "in").at(1),
     );
 
-    let carrier_osc =
-        host.create_group_instance_module::<Oscillator>(group, "carrier_osc", &OscillatorSettings::Sine(1024));
-    host.link_group::<MidiEvents>(&host.group_joining_buf(voices, "out"), &host.group_instance_buf(&carrier_osc, "in"));
+    let carrier_osc = host.create_group_instance_module::<Oscillator>(
+        group,
+        "carrier_osc",
+        &OscillatorSettings::Sine(1024),
+    );
+    host.link_group::<MidiEvents>(
+        &host.group_joining_buf(voices, "out"),
+        &host.group_instance_buf(&carrier_osc, "in"),
+    );
     host.link_group_value::<f32>(0.2, &host.group_instance_buf(&carrier_osc, "vel_amt"));
-    host.link_group::<f32>(&host.group_instance_buf(&fmod_amp, "out"), &host.group_instance_buf(&carrier_osc, "freq_mod"));
+    host.link_group::<f32>(
+        &host.group_instance_buf(&fmod_amp, "out"),
+        &host.group_instance_buf(&carrier_osc, "freq_mod"),
+    );
 
     let carrier_envelope = host.create_group_instance_module::<Envelope>(
         group,
@@ -115,19 +165,41 @@ fn run() -> Result<(), Box<dyn Error>> {
             release: 0.6,
         },
     );
-    host.link_group::<MidiEvents>(&host.group_joining_buf(voices, "out"), &host.group_instance_buf(&carrier_envelope, "in"));
-    host.link_group_ext::<f32>(host.buf(carrier_atk_slider, "out"), &host.group_instance_buf(&carrier_envelope, "attack"));
-    host.link_group_ext::<f32>(host.buf(carrier_rel_slider, "out"), &host.group_instance_buf(&carrier_envelope, "release"));
+    host.link_group::<MidiEvents>(
+        &host.group_joining_buf(voices, "out"),
+        &host.group_instance_buf(&carrier_envelope, "in"),
+    );
+    host.link_group_ext::<f32>(
+        host.buf(carrier_atk_slider, "out"),
+        &host.group_instance_buf(&carrier_envelope, "attack"),
+    );
+    host.link_group_ext::<f32>(
+        host.buf(carrier_rel_slider, "out"),
+        &host.group_instance_buf(&carrier_envelope, "release"),
+    );
     host.link_group::<f32>(
         &host.group_instance_buf(&carrier_osc, "out"),
         &host.group_instance_buf(&carrier_envelope, "in"),
     );
 
     let mixer = host.create_group_joining_module::<Op>(group, "mixer", OpType::Add);
-    host.link_group::<f32>(&host.group_instance_buf(&carrier_envelope, "out"), &host.group_joining_buf(mixer, "in"));
-    
+    host.link_group::<f32>(
+        &host.group_instance_buf(&carrier_envelope, "out"),
+        &host.group_joining_buf(mixer, "in"),
+    );
+
+    let carrier_amp = host.create_variadic_module::<Op>("carrier_amp", OpType::Multiply, 2);
     host.link::<f32>(
         host.buf(mixer.ungrouped(), "out"),
+        host.variadic_buf(carrier_amp, "in").at(0),
+    );
+    host.link::<f32>(
+        host.buf(carrier_vol_slider, "out"),
+        host.variadic_buf(carrier_amp, "in").at(1),
+    );
+
+    host.link::<f32>(
+        host.buf(carrier_amp, "out"),
         host.buf(host.get_output_module(), "in"),
     );
 

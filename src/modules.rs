@@ -46,7 +46,11 @@ impl ModuleSettings for Envelope {
 }
 
 impl Module for Envelope {
-    fn init(mut desc: ModuleDescriptor, settings: EnvelopeSettings, _: usize) -> BuiltModuleDescriptor<Self> {
+    fn init(
+        mut desc: ModuleDescriptor,
+        settings: EnvelopeSettings,
+        _: usize,
+    ) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             signal_in: desc.with_buf_in::<f32>("in"),
@@ -67,15 +71,16 @@ impl Module for Envelope {
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
-        for ((((((midis, signal_in), &attack), &decay), &sustain), &release), signal_out) in buffers_in
-            .get(self.midi_in)
-            .iter()
-            .zip(buffers_in.get(self.signal_in).iter())
-            .zip(buffers_in.get(self.attack_in).iter())
-            .zip(buffers_in.get(self.decay_in).iter())
-            .zip(buffers_in.get(self.sustain_in).iter())
-            .zip(buffers_in.get(self.release_in).iter())
-            .zip(buffers_out.get(self.signal_out).iter_mut())
+        for ((((((midis, signal_in), &attack), &decay), &sustain), &release), signal_out) in
+            buffers_in
+                .get(self.midi_in)
+                .iter()
+                .zip(buffers_in.get(self.signal_in).iter())
+                .zip(buffers_in.get(self.attack_in).iter())
+                .zip(buffers_in.get(self.decay_in).iter())
+                .zip(buffers_in.get(self.sustain_in).iter())
+                .zip(buffers_in.get(self.release_in).iter())
+                .zip(buffers_out.get(self.signal_out).iter_mut())
         {
             let margin = (0.0, 2);
             if !attack.approx_eq(self.settings.attack, margin) {
@@ -102,15 +107,13 @@ impl Module for Envelope {
                             self.time_elapsed = 0.0;
                             self.release_amplitude = 0.0;
                         }
-                        midly::MidiMessage::NoteOff { .. } => {
-                            match self.current_stage {
-                                EnvelopeStage::Release | EnvelopeStage::Silence => {}
-                                _ => {
-                                    self.current_stage = EnvelopeStage::Release;
-                                    self.time_elapsed = 0.0;
-                                }
+                        midly::MidiMessage::NoteOff { .. } => match self.current_stage {
+                            EnvelopeStage::Release | EnvelopeStage::Silence => {}
+                            _ => {
+                                self.current_stage = EnvelopeStage::Release;
+                                self.time_elapsed = 0.0;
                             }
-                        }
+                        },
                         _ => {}
                     }
                 }
@@ -178,7 +181,11 @@ impl ModuleSettings for Op {
 }
 
 impl Module for Op {
-    fn init(mut desc: ModuleDescriptor, operation: OpType, _: usize) -> BuiltModuleDescriptor<Self> {
+    fn init(
+        mut desc: ModuleDescriptor,
+        operation: OpType,
+        _: usize,
+    ) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             op: operation,
             signal_in: desc.with_variadic_buf_in_default(
@@ -290,7 +297,7 @@ impl Module for Oscillator {
     fn init(
         mut desc: ModuleDescriptor,
         settings: OscillatorSettings,
-        _: usize
+        _: usize,
     ) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
