@@ -164,6 +164,7 @@ pub struct MidiSlider {
     current_val: f32,
 }
 
+#[derive(Clone)]
 pub struct MidiSliderSettings {
     pub controller: u8,
     pub default: f32,

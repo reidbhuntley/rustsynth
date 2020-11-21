@@ -29,6 +29,7 @@ pub struct Envelope {
     release_amplitude: f32,
 }
 
+#[derive(Clone)]
 pub struct EnvelopeSettings {
     pub attack: f32,
     pub decay: f32,
@@ -251,6 +252,7 @@ impl Oscillator {
     }
 }
 
+#[derive(Clone)]
 pub enum OscillatorSettings {
     Sine(usize),
     Saw(usize),
