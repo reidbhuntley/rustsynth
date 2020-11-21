@@ -44,7 +44,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             controller: 43,
             default: 0.0,
             min: 0.0,
-            max: 2.0,
+            max: 1.0,
         },
     );
     host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(carrier_atk_slider, "in"));
@@ -55,7 +55,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             controller: 44,
             default: 0.0,
             min: 0.0,
-            max: 3.0,
+            max: 1.7,
         },
     );
     host.link::<MidiEvents>(host.buf(midi, "out"), host.buf(carrier_rel_slider, "in"));
@@ -85,6 +85,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         },
     );
     host.link_group::<MidiEvents>(&host.group_joining_buf(voices, "out"),  &host.group_instance_buf(&fmod_envelope, "in"));
+    host.link_group_ext::<f32>(host.buf(carrier_atk_slider, "out"), &host.group_instance_buf(&fmod_envelope, "attack"));
+    host.link_group_ext::<f32>(host.buf(carrier_rel_slider, "out"), &host.group_instance_buf(&fmod_envelope, "release"));
     host.link_group::<f32>(&host.group_instance_buf(&fmod_osc, "out"), &host.group_instance_buf(&fmod_envelope, "in"));
 
     let fmod_amp = host.create_group_instance_variadic_module::<Op>(group, "fmod_amp", &OpType::Multiply, 2);

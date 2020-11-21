@@ -258,10 +258,10 @@ impl Module for MidiPoly {
                         midly::MidiMessage::NoteOn { key, .. } => {
                             let key = key.as_int();
                             if self.notes.iter().all(|(n, _)| *n != key) {
-                                self.notes.insert(0, (key, event.clone()));
-                                let free_buf = self.midi_out.pop().unwrap();
+                                let free_buf = self.midi_out.remove(self.notes.len().min(self.num_ports - 1));
                                 buffers_out.get(free_buf)[i].push(event.clone());
                                 self.midi_out.insert(0, free_buf);
+                                self.notes.insert(0, (key, event.clone()));
                             }
                         }
                         midly::MidiMessage::NoteOff { key, .. } => {
