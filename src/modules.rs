@@ -6,6 +6,7 @@ use crate::{
     },
     midi::{MidiEvent, MidiEvents},
 };
+use float_cmp::ApproxEq;
 
 enum EnvelopeStage {
     Silence,
@@ -19,13 +20,16 @@ pub struct Envelope {
     midi_in: BufferHandle<In<MidiEvents>>,
     signal_in: BufferHandle<In<f32>>,
     signal_out: BufferHandle<Out<f32>>,
+    attack_in: BufferHandle<In<f32>>,
+    decay_in: BufferHandle<In<f32>>,
+    sustain_in: BufferHandle<In<f32>>,
+    release_in: BufferHandle<In<f32>>,
     settings: EnvelopeSettings,
     inv_attack: f32,
     inv_decay: f32,
     inv_release: f32,
     current_stage: EnvelopeStage,
     time_elapsed: f32,
-    num_notes: i32,
     release_amplitude: f32,
 }
 
@@ -42,17 +46,20 @@ impl ModuleSettings for Envelope {
 }
 
 impl Module for Envelope {
-    fn init(mut desc: ModuleDescriptor, settings: EnvelopeSettings) -> BuiltModuleDescriptor<Self> {
+    fn init(mut desc: ModuleDescriptor, settings: EnvelopeSettings, _: usize) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             signal_in: desc.with_buf_in::<f32>("in"),
             signal_out: desc.with_buf_out::<f32>("out"),
+            attack_in: desc.with_buf_in_default::<f32>("attack", settings.attack),
+            decay_in: desc.with_buf_in_default::<f32>("decay", settings.decay),
+            sustain_in: desc.with_buf_in_default::<f32>("sustain", settings.sustain),
+            release_in: desc.with_buf_in_default::<f32>("release", settings.release),
             current_stage: EnvelopeStage::Silence,
             inv_attack: 1.0 / settings.attack,
             inv_decay: 1.0 / settings.decay,
             inv_release: 1.0 / settings.release,
             time_elapsed: 0.0,
-            num_notes: 0,
             release_amplitude: 0.0,
             settings,
         };
@@ -60,33 +67,48 @@ impl Module for Envelope {
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
-        for ((midis, signal_in), signal_out) in buffers_in
+        for ((((((midis, signal_in), &attack), &decay), &sustain), &release), signal_out) in buffers_in
             .get(self.midi_in)
             .iter()
             .zip(buffers_in.get(self.signal_in).iter())
+            .zip(buffers_in.get(self.attack_in).iter())
+            .zip(buffers_in.get(self.decay_in).iter())
+            .zip(buffers_in.get(self.sustain_in).iter())
+            .zip(buffers_in.get(self.release_in).iter())
             .zip(buffers_out.get(self.signal_out).iter_mut())
         {
+            let margin = (0.0, 2);
+            if !attack.approx_eq(self.settings.attack, margin) {
+                self.settings.attack = attack;
+                self.inv_attack = 1.0 / attack;
+            }
+            if !decay.approx_eq(self.settings.decay, margin) {
+                self.settings.decay = decay;
+                self.inv_decay = 1.0 / decay;
+            }
+            if !sustain.approx_eq(self.settings.sustain, margin) {
+                self.settings.sustain = sustain;
+            }
+            if !release.approx_eq(self.settings.release, margin) {
+                self.settings.release = release;
+                self.inv_release = 1.0 / release;
+            }
+
             for midi in midis.iter() {
                 if let MidiEvent::Midi { message, .. } = midi {
                     match message {
                         midly::MidiMessage::NoteOn { .. } => {
-                            self.num_notes += 1;
                             self.current_stage = EnvelopeStage::Attack;
                             self.time_elapsed = 0.0;
                             self.release_amplitude = 0.0;
                         }
                         midly::MidiMessage::NoteOff { .. } => {
-                            self.num_notes -= 1;
-                            if self.num_notes == 0 {
-                                match self.current_stage {
-                                    EnvelopeStage::Release | EnvelopeStage::Silence => {}
-                                    _ => {
-                                        self.current_stage = EnvelopeStage::Release;
-                                        self.time_elapsed = 0.0;
-                                    }
+                            match self.current_stage {
+                                EnvelopeStage::Release | EnvelopeStage::Silence => {}
+                                _ => {
+                                    self.current_stage = EnvelopeStage::Release;
+                                    self.time_elapsed = 0.0;
                                 }
-                            } else {
-                                self.current_stage = EnvelopeStage::Sustain;
                             }
                         }
                         _ => {}
@@ -156,7 +178,7 @@ impl ModuleSettings for Op {
 }
 
 impl Module for Op {
-    fn init(mut desc: ModuleDescriptor, operation: OpType) -> BuiltModuleDescriptor<Self> {
+    fn init(mut desc: ModuleDescriptor, operation: OpType, _: usize) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             op: operation,
             signal_in: desc.with_variadic_buf_in_default(
@@ -268,6 +290,7 @@ impl Module for Oscillator {
     fn init(
         mut desc: ModuleDescriptor,
         settings: OscillatorSettings,
+        _: usize
     ) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),

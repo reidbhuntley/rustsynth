@@ -235,7 +235,7 @@ mod private {
 
     impl ModuleInternals {
         pub fn new<T: Module + ModuleSettings>(settings: T::Settings, num_args: usize) -> Self {
-            let descriptor = T::init(ModuleDescriptor::new(num_args), settings);
+            let descriptor = T::init(ModuleDescriptor::new(num_args), settings, num_args);
             Self {
                 module: descriptor.initial_data,
                 num_args,
@@ -453,6 +453,10 @@ impl<T: BufferDir> VariadicBufferHandle<T> {
         }
         BufferHandle::<T>::new(self.buffer.idx + idx)
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = BufferHandle<T>> + '_ {
+        (0..self.num_args).map(move |i| self.at(i))
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -632,7 +636,7 @@ pub trait ModuleSettings {
 }
 
 pub trait Module: 'static + Any {
-    fn init(descriptor: ModuleDescriptor, settings: Self::Settings) -> BuiltModuleDescriptor<Self>
+    fn init(descriptor: ModuleDescriptor, settings: Self::Settings, num_variadic_args: usize) -> BuiltModuleDescriptor<Self>
     where
         Self: Sized + ModuleSettings;
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut);
@@ -797,6 +801,12 @@ impl Host {
         assert!(buf_out.handles.len() == buf_in.handles.len());
         for (&handle_out, &handle_in) in buf_out.handles.iter().zip(buf_in.handles.iter()) {
             self.link(handle_out, handle_in);
+        }
+    }
+
+    pub fn link_group_ext<T: BufferElem>(&mut self, buf_out: ModuleBufferHandle<Out<T>>, buf_in: &GroupBufferHandle<In<T>>) {
+        for &handle_in in buf_in.handles.iter() {
+            self.link(buf_out, handle_in);
         }
     }
 
@@ -1050,6 +1060,20 @@ impl Host {
                 .collect(),
         }
     }
+
+    pub fn group_instance_variadic_buf<T: BufferDir>(
+        &self,
+        handle: &GroupInstanceModuleHandle,
+        name: &str,
+    ) -> GroupVariadicBufferHandle<T> {
+        GroupVariadicBufferHandle {
+            handles: handle
+                .handles
+                .iter()
+                .map(|&module| self.variadic_buf(module, name))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1137,4 +1161,17 @@ impl Group {
 #[derive(Clone)]
 pub struct GroupBufferHandle<T: BufferDir> {
     handles: Vec<ModuleBufferHandle<T>>,
+}
+
+#[derive(Clone)]
+pub struct GroupVariadicBufferHandle<T: BufferDir> {
+    handles: Vec<ModuleVariadicBufferHandle<T>>,
+}
+
+impl<T: BufferDir> GroupVariadicBufferHandle<T> {
+    pub fn at(&self, idx: usize) -> GroupBufferHandle<T> {
+        GroupBufferHandle {
+            handles: self.handles.iter().map(|h| h.at(idx)).collect()
+        }
+    }
 }

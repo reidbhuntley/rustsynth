@@ -6,13 +6,7 @@ use midly::live::LiveEvent as MLiveEvent;
 use midly::live::SystemCommon as MSysCom;
 use midly::num::*;
 
-use crate::{
-    constants::*,
-    host::{
-        BufferHandle, BuiltModuleDescriptor, In, Module, ModuleBuffersIn, ModuleBuffersOut,
-        ModuleDescriptor, ModuleSettings, Out,
-    },
-};
+use crate::{constants::*, host::{BufferHandle, BuiltModuleDescriptor, In, Module, ModuleBuffersIn, ModuleBuffersOut, ModuleDescriptor, ModuleSettings, Out, VariadicBufferHandle}};
 
 #[derive(Debug, Clone)]
 pub enum MidiEvent {
@@ -84,7 +78,7 @@ impl ModuleSettings for MidiInput {
 }
 
 impl Module for MidiInput {
-    fn init(mut desc: ModuleDescriptor, port_idx: usize) -> BuiltModuleDescriptor<Self> {
+    fn init(mut desc: ModuleDescriptor, port_idx: usize, _: usize) -> BuiltModuleDescriptor<Self> {
         let mut midi_in = MidirInput::new("midir reading input").unwrap();
         midi_in.ignore(Ignore::None);
 
@@ -180,6 +174,7 @@ impl Module for MidiSlider {
     fn init(
         mut desc: ModuleDescriptor,
         settings: MidiSliderSettings,
+        _: usize
     ) -> BuiltModuleDescriptor<Self> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
@@ -215,6 +210,84 @@ impl Module for MidiSlider {
             }
 
             *out = self.current_val;
+        }
+    }
+}
+
+pub struct MidiPoly {
+    num_ports: usize,
+    notes: Vec<(u8, MidiEvent)>,
+    midi_in: BufferHandle<In<MidiEvents>>,
+    midi_out: Vec<BufferHandle<Out<MidiEvents>>>,
+    midi_out_variadic: VariadicBufferHandle<Out<MidiEvents>>
+    
+}
+
+impl ModuleSettings for MidiPoly {
+    type Settings = ();
+}
+
+impl Module for MidiPoly {
+    fn init(mut desc: ModuleDescriptor, _settings: (), num_ports: usize) -> BuiltModuleDescriptor<Self> {
+        let midi_out = desc.with_variadic_buf_out::<MidiEvents>("out");
+        let module = Self {
+            num_ports,
+            notes: Default::default(),
+            midi_in: desc.with_buf_in::<MidiEvents>("in"),
+            midi_out: midi_out.iter().collect(),
+            midi_out_variadic: midi_out
+        };
+        desc.build(module)
+    }
+
+    fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
+        if self.num_ports == 0 {
+            return;
+        }
+
+        for buffer in buffers_out.get_iter(self.midi_out_variadic) {
+            for events in buffer {
+                events.clear();
+            }
+        }
+
+        for (i, events) in buffers_in.get(self.midi_in).iter().enumerate() {
+            for event in events {
+                if let MidiEvent::Midi { message, .. } = event {
+                    match message {
+                        midly::MidiMessage::NoteOn { key, .. } => {
+                            let key = key.as_int();
+                            if self.notes.iter().all(|(n, _)| *n != key) {
+                                self.notes.insert(0, (key, event.clone()));
+                                let free_buf = self.midi_out.pop().unwrap();
+                                buffers_out.get(free_buf)[i].push(event.clone());
+                                self.midi_out.insert(0, free_buf);
+                            }
+                        }
+                        midly::MidiMessage::NoteOff { key, .. } => {
+                            let key = key.as_int();
+                            match self.notes.iter().position(|(n, _)| *n == key) {
+                                Some(idx) => {
+                                    self.notes.remove(idx);
+                                    if idx < self.num_ports {
+                                        let old_buf = self.midi_out.remove(idx);
+                                        self.midi_out.push(old_buf);
+                                        buffers_out.get(old_buf)[i].push(if let Some((_, on_event)) = self.notes.get(self.num_ports - 1) {
+                                            on_event.clone()
+                                        } else {
+                                            event.clone()
+                                        });
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        _ => for buf_out in buffers_out.get_iter(self.midi_out_variadic) {
+                            buf_out[i].push(event.clone())
+                        }
+                    }
+                }
+            }
         }
     }
 }
