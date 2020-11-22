@@ -5,7 +5,10 @@ use crate::{
     },
 };
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::{
+    convert::Infallible,
+    sync::{Arc, Condvar, Mutex},
+};
 
 use rodio::Source;
 
@@ -129,6 +132,7 @@ pub(crate) struct AudioOutputModule {
 
 impl ModuleSettings for AudioOutputModule {
     type Settings = AudioOutput;
+    type Error = Infallible;
 }
 
 impl Module for AudioOutputModule {
@@ -136,12 +140,12 @@ impl Module for AudioOutputModule {
         mut desc: ModuleDescriptor,
         output: AudioOutput,
         _: usize,
-    ) -> BuiltModuleDescriptor<Self> {
+    ) -> Result<BuiltModuleDescriptor<Self>, Infallible> {
         let module = Self {
             signal_in: desc.with_buf_in::<f32>("in"),
             output,
         };
-        desc.build(module)
+        Ok(desc.build(module))
     }
 
     fn fill_buffers(

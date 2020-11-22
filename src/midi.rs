@@ -1,10 +1,12 @@
-use std::{sync::mpsc, time::Instant};
+use std::{convert::Infallible, sync::mpsc, time::Instant};
 
 use midir::{Ignore, MidiInput as MidirInput, MidiInputConnection};
 
 use midly::live::LiveEvent as MLiveEvent;
 use midly::live::SystemCommon as MSysCom;
 use midly::num::*;
+
+use thiserror::Error;
 
 use crate::{
     constants::*,
@@ -79,34 +81,50 @@ pub struct MidiInput {
     event_queue: Vec<RawEvent>,
 }
 
+#[derive(Error, Debug)]
+pub enum MidiInputError {
+    #[error(transparent)]
+    InitError(#[from] midir::InitError),
+    #[error(transparent)]
+    ConnectError(#[from] midir::ConnectError<MidirInput>),
+    #[error("no MIDI device available on port {0}")]
+    PortError(usize),
+}
+
 impl ModuleSettings for MidiInput {
     type Settings = usize;
+    type Error = MidiInputError;
 }
 
 impl Module for MidiInput {
-    fn init(mut desc: ModuleDescriptor, port_idx: usize, _: usize) -> BuiltModuleDescriptor<Self> {
-        let mut midi_in = MidirInput::new("midir reading input").unwrap();
+    fn init(
+        mut desc: ModuleDescriptor,
+        port_idx: usize,
+        _: usize,
+    ) -> Result<BuiltModuleDescriptor<Self>, MidiInputError> {
+        let mut midi_in = MidirInput::new("midir reading input")?;
         midi_in.ignore(Ignore::None);
 
         // Get an input port
-        let in_port = &midi_in.ports()[port_idx];
+        let ports = midi_in.ports();
+        let in_port = ports
+            .get(port_idx)
+            .ok_or(MidiInputError::PortError(port_idx))?;
 
         let (tx, rx) = mpsc::channel();
         // conn_in needs to be a named parameter, because it needs to be kept alive until the end of the scope
-        let _conn_in = midi_in
-            .connect(
-                in_port,
-                "midir-read-input",
-                move |_timestamp, message, _| {
-                    tx.send(RawEvent {
-                        time_received: Instant::now(),
-                        message: message.into(),
-                    })
-                    .unwrap();
-                },
-                (),
-            )
-            .unwrap();
+        let _conn_in = midi_in.connect(
+            in_port,
+            "midir-read-input",
+            move |_timestamp, message, _| {
+                tx.send(RawEvent {
+                    time_received: Instant::now(),
+                    message: message.into(),
+                })
+                .unwrap();
+            },
+            (),
+        )?;
 
         let module = Self {
             buf_out: desc.with_buf_out::<MidiEvents>("out"),
@@ -115,7 +133,7 @@ impl Module for MidiInput {
             event_receiver: rx,
             event_queue: Vec::new(),
         };
-        desc.build(module)
+        Ok(desc.build(module))
     }
 
     fn fill_buffers(&mut self, _buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
@@ -174,6 +192,7 @@ pub struct MidiSliderSettings {
 
 impl ModuleSettings for MidiSlider {
     type Settings = MidiSliderSettings;
+    type Error = Infallible;
 }
 
 impl Module for MidiSlider {
@@ -181,7 +200,7 @@ impl Module for MidiSlider {
         mut desc: ModuleDescriptor,
         settings: MidiSliderSettings,
         _: usize,
-    ) -> BuiltModuleDescriptor<Self> {
+    ) -> Result<BuiltModuleDescriptor<Self>, Infallible> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             signal_out: desc.with_buf_out::<f32>("out"),
@@ -189,7 +208,7 @@ impl Module for MidiSlider {
             range: settings.max - settings.min,
             settings,
         };
-        desc.build(module)
+        Ok(desc.build(module))
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
@@ -228,8 +247,13 @@ pub struct MidiPoly {
     midi_out_variadic: VariadicBufferHandle<Out<MidiEvents>>,
 }
 
+#[derive(Error, Debug)]
+#[error("MidiPoly must have at least one input buffer")]
+pub struct MidiPolyError;
+
 impl ModuleSettings for MidiPoly {
     type Settings = ();
+    type Error = MidiPolyError;
 }
 
 impl Module for MidiPoly {
@@ -237,23 +261,23 @@ impl Module for MidiPoly {
         mut desc: ModuleDescriptor,
         _settings: (),
         num_ports: usize,
-    ) -> BuiltModuleDescriptor<Self> {
+    ) -> Result<BuiltModuleDescriptor<Self>, MidiPolyError> {
+        if num_ports == 0 {
+            return Err(MidiPolyError);
+        }
+
         let midi_out = desc.with_variadic_buf_out::<MidiEvents>("out");
         let module = Self {
             num_ports,
             notes: Default::default(),
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
-            midi_out: midi_out.iter().collect(),
+            midi_out: midi_out.all().collect(),
             midi_out_variadic: midi_out,
         };
-        desc.build(module)
+        Ok(desc.build(module))
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
-        if self.num_ports == 0 {
-            return;
-        }
-
         for buffer in buffers_out.get_iter(self.midi_out_variadic) {
             for events in buffer {
                 events.clear();

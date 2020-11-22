@@ -1,13 +1,12 @@
-use std::any::Any;
+use std::{any::Any, fmt::Display};
+use thiserror::Error;
 
 use arr_macro::arr;
 use rodio::Source;
 
 use crate::{constants::*, midi::MidiEvents, output::AudioOutput, output::AudioOutputModule};
 
-use self::private::{
-    BufferInPort, BufferMarker, FastHashMap, ModuleBuffersDescriptor, ModuleInternals,
-};
+use self::private::{BufferInPort, FastHashMap, ModuleBuffersDescriptor, ModuleInternals};
 
 pub trait BufferElem: 'static + private::BufferElemSealed + Default + Clone {
     fn new_buffer(self) -> Buffer<Self> {
@@ -31,9 +30,10 @@ mod private {
     use seahash::SeaHasher;
 
     use super::{
-        BufferDir, BufferElem, BufferHandle, BufferHandleRaw, BuffersInExt, BuffersOutExt, In,
-        Module, ModuleBufferHandle, ModuleBuffersIn, ModuleBuffersOut, ModuleDescriptor,
-        ModuleSettings, Out, VariadicBufferHandle,
+        BufferArity, BufferDir, BufferDirEnum, BufferElem, BufferElemEnum, BufferHandle,
+        BufferHandleRaw, BufferType, BuffersInExt, BuffersOutExt, HostError, HostIdentifier,
+        HostResult, In, Module, ModuleBufferHandle, ModuleBuffersIn, ModuleBuffersOut,
+        ModuleDescriptor, ModuleError, ModuleResult, ModuleSettings, Out, VariadicBufferHandle,
     };
 
     #[derive(Clone, Default)]
@@ -74,28 +74,28 @@ mod private {
         }
     }
 
-    enum VariadicMarked<T: BufferDir> {
-        Normal(BufferHandle<T>),
+    enum HandleArity<T: BufferDir> {
+        Single(BufferHandle<T>),
         Variadic(VariadicBufferHandle<T>),
     }
 
     pub struct BufferPorts<D: BufferDir> {
         num_args: usize,
         pub buffers: Vec<D::BufferPort>,
-        handles: FastHashMap<String, VariadicMarked<D>>,
+        handles: FastHashMap<String, HandleArity<D>>,
     }
 
     impl<D: BufferDir> BufferPorts<D> {
-        fn new(descriptor: &ModuleDescriptor) -> Self {
+        fn new(descriptor: &ModuleDescriptor) -> ModuleResult<Self> {
             let mut out = Self {
                 num_args: descriptor.num_args,
                 buffers: Default::default(),
                 handles: Default::default(),
             };
             for (marker, name, elem) in D::get_elems(descriptor).iter() {
-                out.add_buffer(*marker, D::create_port(elem), name);
+                out.add_buffer(*marker, D::create_port(elem), name)?;
             }
-            out
+            Ok(out)
         }
 
         pub fn get_buf(&self, handle: BufferHandle<D>) -> &D::BufferPort {
@@ -106,51 +106,68 @@ mod private {
             &mut self.buffers[handle.idx]
         }
 
-        pub fn get_handle(&self, name: &str) -> BufferHandle<D> {
-            match self.handles[name] {
-                VariadicMarked::Normal(handle) => handle,
-                VariadicMarked::Variadic(_) => panic!(),
+        pub fn get_handle(&self, name: &str) -> HostResult<BufferHandle<D>> {
+            match self.handles.get(name) {
+                Some(HandleArity::Single(handle)) => Ok(*handle),
+                Some(HandleArity::Variadic(_)) => Err(HostError::UnexpectedBufferArity {
+                    expected: BufferArity::Single,
+                    found: BufferArity::Variadic,
+                }),
+                None => Err(HostError::NonexistentIdentifier {
+                    ident: name.to_owned(),
+                    ident_type: HostIdentifier::Buffer(D::name()),
+                }),
             }
         }
 
-        pub fn get_variadic_handle(&self, name: &str) -> VariadicBufferHandle<D> {
-            match self.handles[name] {
-                VariadicMarked::Normal(_) => panic!(),
-                VariadicMarked::Variadic(handle) => handle,
+        pub fn get_variadic_handle(&self, name: &str) -> HostResult<VariadicBufferHandle<D>> {
+            match self.handles.get(name) {
+                Some(HandleArity::Single(_)) => Err(HostError::UnexpectedBufferArity {
+                    expected: BufferArity::Single,
+                    found: BufferArity::Variadic,
+                }),
+                Some(HandleArity::Variadic(handle)) => Ok(*handle),
+                None => Err(HostError::NonexistentIdentifier {
+                    ident: name.to_owned(),
+                    ident_type: HostIdentifier::Buffer(D::name()),
+                }),
             }
         }
 
-        fn add_buffer(&mut self, marker: BufferMarker, port: D::BufferPort, name: &str) {
+        fn add_buffer(
+            &mut self,
+            marker: BufferArity,
+            port: D::BufferPort,
+            name: &str,
+        ) -> ModuleResult<()> {
             if self.handles.contains_key(name) {
-                panic!()
+                Err(ModuleError::DuplicateBufferIdentifier {
+                    ident: name.to_owned(),
+                    buffer_type: D::name(),
+                })
             } else {
                 let handle = BufferHandle::new(self.buffers.len());
                 self.handles.insert(
                     name.to_owned(),
                     match marker {
-                        BufferMarker::Normal => {
+                        BufferArity::Single => {
                             self.buffers.push(port.clone());
-                            VariadicMarked::Normal(handle)
+                            HandleArity::Single(handle)
                         }
-                        BufferMarker::Variadic => {
+                        BufferArity::Variadic => {
                             for _ in 0..self.num_args {
                                 self.buffers.push(port.clone());
                             }
-                            VariadicMarked::Variadic(VariadicBufferHandle {
+                            HandleArity::Variadic(VariadicBufferHandle {
                                 num_args: self.num_args,
                                 buffer: handle,
                             })
                         }
                     },
                 );
+                Ok(())
             }
         }
-    }
-
-    #[derive(Clone, Copy)]
-    pub enum BufferMarker {
-        Normal,
-        Variadic,
     }
 
     #[derive(Clone)]
@@ -158,8 +175,8 @@ mod private {
         num_args: usize,
         next_idx_buf_in: BufferHandleRaw,
         next_idx_buf_out: BufferHandleRaw,
-        pub buf_in: Vec<(BufferMarker, String, T)>,
-        pub buf_out: Vec<(BufferMarker, String, ())>,
+        pub buf_in: Vec<(BufferArity, String, T)>,
+        pub buf_out: Vec<(BufferArity, String, ())>,
     }
 
     impl<T: BufferElem> ModuleBuffersDescriptor<T> {
@@ -173,21 +190,21 @@ mod private {
             }
         }
 
-        pub fn add_buf_in(&mut self, elem: (BufferMarker, String, T)) -> BufferHandleRaw {
+        pub fn add_buf_in(&mut self, elem: (BufferArity, String, T)) -> BufferHandleRaw {
             let out = self.next_idx_buf_in;
             self.next_idx_buf_in += match elem.0 {
-                BufferMarker::Normal => 1,
-                BufferMarker::Variadic => self.num_args,
+                BufferArity::Single => 1,
+                BufferArity::Variadic => self.num_args,
             };
             self.buf_in.push(elem);
             out
         }
 
-        pub fn add_buf_out(&mut self, elem: (BufferMarker, String, ())) -> BufferHandleRaw {
+        pub fn add_buf_out(&mut self, elem: (BufferArity, String, ())) -> BufferHandleRaw {
             let out = self.next_idx_buf_out;
             self.next_idx_buf_out += match elem.0 {
-                BufferMarker::Normal => 1,
-                BufferMarker::Variadic => self.num_args,
+                BufferArity::Single => 1,
+                BufferArity::Variadic => self.num_args,
             };
             self.buf_out.push(elem);
             out
@@ -202,13 +219,13 @@ mod private {
     }
 
     impl ModuleBuffersInInternal {
-        pub fn new(descriptors: &ModuleDescriptor) -> Self {
-            Self {
+        pub fn new(descriptors: &ModuleDescriptor) -> ModuleResult<Self> {
+            Ok(Self {
                 num_dependencies: 0,
                 num_finished_dependencies: AtomicUsize::new(0),
-                buf_signal: BufferPorts::new(&descriptors),
-                buf_midi: BufferPorts::new(&descriptors),
-            }
+                buf_signal: BufferPorts::new(&descriptors)?,
+                buf_midi: BufferPorts::new(&descriptors)?,
+            })
         }
     }
 
@@ -218,11 +235,11 @@ mod private {
     }
 
     impl ModuleBuffersOutInternal {
-        pub fn new(descriptors: &ModuleDescriptor) -> Self {
-            Self {
-                buf_signal: BufferPorts::new(&descriptors),
-                buf_midi: BufferPorts::new(&descriptors),
-            }
+        pub fn new(descriptors: &ModuleDescriptor) -> ModuleResult<Self> {
+            Ok(Self {
+                buf_signal: BufferPorts::new(&descriptors)?,
+                buf_midi: BufferPorts::new(&descriptors)?,
+            })
         }
     }
 
@@ -234,26 +251,31 @@ mod private {
     }
 
     impl ModuleInternals {
-        pub fn new<T: Module + ModuleSettings>(settings: T::Settings, num_args: usize) -> Self {
-            let descriptor = T::init(ModuleDescriptor::new(num_args), settings, num_args);
-            Self {
+        pub fn new<T: Module + ModuleSettings>(
+            settings: T::Settings,
+            num_args: usize,
+        ) -> ModuleResult<Self> {
+            let descriptor = T::init(ModuleDescriptor::new(num_args), settings, num_args)
+                .map_err(|e| ModuleError::Custom(e.to_string()))?;
+            Ok(Self {
                 module: descriptor.initial_data,
                 num_args,
-                buf_in: ModuleBuffersInInternal::new(&descriptor.buffers_descriptors),
-                buf_out: ModuleBuffersOutInternal::new(&descriptor.buffers_descriptors),
-            }
+                buf_in: ModuleBuffersInInternal::new(&descriptor.buffers_descriptors)?,
+                buf_out: ModuleBuffersOutInternal::new(&descriptor.buffers_descriptors)?,
+            })
         }
     }
 
     pub trait BufferDirSealed {
         type DescriptorElem;
         type BufferPort: Clone;
+        fn name() -> BufferType;
         fn get_buffers(internals: &ModuleInternals) -> &BufferPorts<Self>
         where
             Self: Sized + BufferDir;
         fn get_elems(
             descriptor: &ModuleDescriptor,
-        ) -> &Vec<(BufferMarker, String, Self::DescriptorElem)>;
+        ) -> &Vec<(BufferArity, String, Self::DescriptorElem)>;
         fn create_port(elem: &Self::DescriptorElem) -> Self::BufferPort;
     }
 
@@ -261,13 +283,20 @@ mod private {
         type DescriptorElem = T;
         type BufferPort = BufferInPort<T>;
 
+        fn name() -> BufferType {
+            BufferType {
+                dir: BufferDirEnum::In,
+                elem: T::name(),
+            }
+        }
+
         fn get_buffers(internals: &ModuleInternals) -> &BufferPorts<Self> {
             T::get_buffers_in(&internals.buf_in)
         }
 
         fn get_elems(
             descriptor: &ModuleDescriptor,
-        ) -> &Vec<(BufferMarker, String, Self::DescriptorElem)> {
+        ) -> &Vec<(BufferArity, String, Self::DescriptorElem)> {
             &T::get_descriptor(descriptor).buf_in
         }
 
@@ -280,13 +309,20 @@ mod private {
         type DescriptorElem = ();
         type BufferPort = BufferOutPort<T>;
 
+        fn name() -> BufferType {
+            BufferType {
+                dir: BufferDirEnum::Out,
+                elem: T::name(),
+            }
+        }
+
         fn get_buffers(internals: &ModuleInternals) -> &BufferPorts<Self> {
             T::get_buffers_out(&internals.buf_out)
         }
 
         fn get_elems(
             descriptor: &ModuleDescriptor,
-        ) -> &Vec<(BufferMarker, String, Self::DescriptorElem)> {
+        ) -> &Vec<(BufferArity, String, Self::DescriptorElem)> {
             &T::get_descriptor(descriptor).buf_out
         }
 
@@ -299,6 +335,8 @@ mod private {
     }
 
     pub trait BufferElemSealed {
+        fn name() -> BufferElemEnum;
+
         fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferPorts<In<Self>>
         where
             Self: Sized + BufferElem;
@@ -336,6 +374,10 @@ mod private {
             Self: Sized + BufferElem;
     }
     impl BufferElemSealed for f32 {
+        fn name() -> BufferElemEnum {
+            BufferElemEnum::Signal
+        }
+
         fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferPorts<In<Self>> {
             &buf_in.buf_signal
         }
@@ -373,6 +415,10 @@ mod private {
         }
     }
     impl BufferElemSealed for crate::midi::MidiEvents {
+        fn name() -> BufferElemEnum {
+            BufferElemEnum::Midi
+        }
+
         fn get_buffers_in(buf_in: &ModuleBuffersInInternal) -> &BufferPorts<In<Self>> {
             &buf_in.buf_midi
         }
@@ -447,15 +493,19 @@ pub struct VariadicBufferHandle<T: BufferDir> {
 }
 
 impl<T: BufferDir> VariadicBufferHandle<T> {
-    pub fn at(&self, idx: usize) -> BufferHandle<T> {
+    pub fn at(&self, idx: usize) -> HostResult<BufferHandle<T>> {
         if idx >= self.num_args {
-            panic!()
+            Err(HostError::VariadicBufferOutOfBounds {
+                idx,
+                len: self.num_args,
+            })
+        } else {
+            Ok(BufferHandle::<T>::new(self.buffer.idx + idx))
         }
-        BufferHandle::<T>::new(self.buffer.idx + idx)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = BufferHandle<T>> + '_ {
-        (0..self.num_args).map(move |i| self.at(i))
+    pub fn all(&self) -> impl Iterator<Item = BufferHandle<T>> + '_ {
+        (0..self.num_args).map(move |i| self.at(i).unwrap())
     }
 }
 
@@ -479,16 +529,19 @@ pub struct ModuleVariadicBufferHandle<T: BufferDir> {
 }
 
 impl<T: BufferDir> ModuleVariadicBufferHandle<T> {
-    pub fn at(&self, idx: usize) -> ModuleBufferHandle<T> {
-        ModuleBufferHandle {
+    pub fn at(&self, idx: usize) -> HostResult<ModuleBufferHandle<T>> {
+        Ok(ModuleBufferHandle {
             module_handle: self.module_handle,
-            buf_handle: self.buf_handle.at(idx),
-        }
+            buf_handle: self.buf_handle.at(idx)?,
+        })
     }
 
-    pub fn all(&self) -> GroupBufferHandle<T> {
+    pub fn all(&self, group: GroupHandle) -> GroupBufferHandle<T> {
         GroupBufferHandle {
-            handles: (0..self.buf_handle.num_args).map(|i| self.at(i)).collect(),
+            group,
+            handles: (0..self.buf_handle.num_args)
+                .map(|i| self.at(i).unwrap())
+                .collect(),
         }
     }
 }
@@ -526,7 +579,7 @@ impl ModuleDescriptor {
         default: E,
     ) -> BufferHandle<In<E>> {
         BufferHandle::new(E::get_descriptor_mut(self).add_buf_in((
-            BufferMarker::Normal,
+            BufferArity::Single,
             name.to_owned(),
             default,
         )))
@@ -538,7 +591,7 @@ impl ModuleDescriptor {
 
     pub fn with_buf_out<E: BufferElem>(&mut self, name: &str) -> BufferHandle<Out<E>> {
         BufferHandle::new(E::get_descriptor_mut(self).add_buf_out((
-            BufferMarker::Normal,
+            BufferArity::Single,
             name.to_owned(),
             (),
         )))
@@ -552,7 +605,7 @@ impl ModuleDescriptor {
         VariadicBufferHandle {
             num_args: self.num_args,
             buffer: BufferHandle::new(E::get_descriptor_mut(self).add_buf_in((
-                BufferMarker::Variadic,
+                BufferArity::Variadic,
                 name.to_owned(),
                 default,
             ))),
@@ -573,7 +626,7 @@ impl ModuleDescriptor {
         VariadicBufferHandle {
             num_args: self.num_args,
             buffer: BufferHandle::new(E::get_descriptor_mut(self).add_buf_out((
-                BufferMarker::Variadic,
+                BufferArity::Variadic,
                 name.to_owned(),
                 (),
             ))),
@@ -594,7 +647,7 @@ impl ModuleBuffersIn {
         unsafe { &*bufs }
     }
 
-    pub fn get_iter<T: BufferElem>(
+    pub fn get_variadic<T: BufferElem>(
         &self,
         handle: VariadicBufferHandle<In<T>>,
     ) -> impl Iterator<Item = &Buffer<T>> + '_ {
@@ -633,6 +686,7 @@ impl ModuleBuffersOut {
 
 pub trait ModuleSettings {
     type Settings: Clone;
+    type Error: std::error::Error;
 }
 
 pub trait Module: 'static + Any {
@@ -640,7 +694,7 @@ pub trait Module: 'static + Any {
         descriptor: ModuleDescriptor,
         settings: Self::Settings,
         num_variadic_args: usize,
-    ) -> BuiltModuleDescriptor<Self>
+    ) -> Result<BuiltModuleDescriptor<Self>, Self::Error>
     where
         Self: Sized + ModuleSettings;
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut);
@@ -660,7 +714,7 @@ pub struct Host {
 const OUTPUT_MODULE_NAME: &str = "audio_out";
 
 impl Host {
-    pub fn new() -> Self {
+    pub fn new() -> HostResult<Self> {
         let output = AudioOutput::new();
         let mut out = Self {
             modules: Default::default(),
@@ -672,8 +726,8 @@ impl Host {
             output: output.clone().stoppable(),
             output_handle: ModuleHandle { idx: 0 },
         };
-        out.output_handle = out.create_module::<AudioOutputModule>(OUTPUT_MODULE_NAME, output);
-        out
+        out.output_handle = out.create_module::<AudioOutputModule>(OUTPUT_MODULE_NAME, output)?;
+        Ok(out)
     }
 
     pub fn get_output_module(&self) -> ModuleHandle {
@@ -684,12 +738,12 @@ impl Host {
         &mut self,
         settings: T::Settings,
         num_args: usize,
-    ) -> ModuleHandle {
-        let module = ModuleInternals::new::<T>(settings, num_args);
+    ) -> ModuleResult<ModuleHandle> {
+        let module = ModuleInternals::new::<T>(settings, num_args)?;
         let idx = self.next_module_idx;
         self.next_module_idx += 1;
         self.modules.insert(idx, module);
-        ModuleHandle { idx }
+        Ok(ModuleHandle { idx })
     }
 
     pub fn create_variadic_module<T: Module + ModuleSettings>(
@@ -697,39 +751,52 @@ impl Host {
         name: &str,
         settings: T::Settings,
         num_args: usize,
-    ) -> ModuleHandle {
+    ) -> HostResult<ModuleHandle> {
         if self.module_handles.contains_key(name) {
-            panic!()
+            Err(HostError::DuplicateIdentifier {
+                ident: name.to_owned(),
+                ident_type: HostIdentifier::Module,
+            })
+        } else {
+            let handle = self
+                .create_variadic_module_anonymous::<T>(settings, num_args)
+                .map_err(|e| HostError::ModuleInit {
+                    module_name: name.to_owned(),
+                    source: e,
+                })?;
+            self.module_handles.insert(name.to_owned(), handle);
+            Ok(handle)
         }
-        let handle = self.create_variadic_module_anonymous::<T>(settings, num_args);
-        self.module_handles.insert(name.to_owned(), handle);
-        handle
     }
 
     pub fn create_module<T: Module + ModuleSettings>(
         &mut self,
         name: &str,
         settings: T::Settings,
-    ) -> ModuleHandle {
+    ) -> HostResult<ModuleHandle> {
         self.create_variadic_module::<T>(name, settings, 0)
     }
 
-    pub fn buf<T: BufferDir>(&self, handle: ModuleHandle, name: &str) -> ModuleBufferHandle<T> {
-        ModuleBufferHandle {
+    pub fn buf<T: BufferDir>(
+        &self,
+        handle: ModuleHandle,
+        name: &str,
+    ) -> HostResult<ModuleBufferHandle<T>> {
+        Ok(ModuleBufferHandle {
             module_handle: handle,
-            buf_handle: T::get_buffers(&self.modules[&handle.idx]).get_handle(name),
-        }
+            buf_handle: T::get_buffers(&self.modules[&handle.idx]).get_handle(name)?,
+        })
     }
 
     pub fn variadic_buf<T: BufferDir>(
         &self,
         handle: ModuleHandle,
         name: &str,
-    ) -> ModuleVariadicBufferHandle<T> {
-        ModuleVariadicBufferHandle {
+    ) -> HostResult<ModuleVariadicBufferHandle<T>> {
+        Ok(ModuleVariadicBufferHandle {
             module_handle: handle,
-            buf_handle: T::get_buffers(&self.modules[&handle.idx]).get_variadic_handle(name),
-        }
+            buf_handle: T::get_buffers(&self.modules[&handle.idx]).get_variadic_handle(name)?,
+        })
     }
 
     fn set_buffer_in<T: BufferElem>(
@@ -742,7 +809,7 @@ impl Host {
             .get_mut(&port_handle.module_handle.idx)
             .unwrap();
 
-        let port = &T::get_buffers_in(&module_in.buf_in).get_buf(port_handle.buf_handle);
+        let port = T::get_buffers_in(&module_in.buf_in).get_buf(port_handle.buf_handle);
         let (old_out, new_out) = match port {
             BufferInPort::OutBuffer(out) => (
                 Some(out.clone()),
@@ -801,11 +868,14 @@ impl Host {
         &mut self,
         buf_out: &GroupBufferHandle<Out<T>>,
         buf_in: &GroupBufferHandle<In<T>>,
-    ) {
-        assert!(buf_out.handles.len() == buf_in.handles.len());
+    ) -> HostResult<()> {
+        if buf_out.group != buf_in.group {
+            return Err(HostError::BufferGroupMismatch);
+        }
         for (&handle_out, &handle_in) in buf_out.handles.iter().zip(buf_in.handles.iter()) {
             self.link(handle_out, handle_in);
         }
+        Ok(())
     }
 
     pub fn link_group_ext<T: BufferElem>(
@@ -824,49 +894,49 @@ impl Host {
         }
     }
 
-    pub fn destroy_module(&mut self, handle: ModuleHandle) {
-        fn remove_dependents<T: BufferElem>(host: &mut Host, module: &ModuleInternals) {
-            for out_port in T::get_buffers_out(&module.buf_out).buffers.iter() {
-                for dep_handle in out_port.dependents.iter() {
-                    host.set_buffer_in(dep_handle.clone(), BufferInPort::default());
-                }
-            }
-        }
+    // pub fn destroy_module(&mut self, handle: ModuleHandle) {
+    //     fn remove_dependents<T: BufferElem>(host: &mut Host, module: &ModuleInternals) {
+    //         for out_port in T::get_buffers_out(&module.buf_out).buffers.iter() {
+    //             for dep_handle in out_port.dependents.iter() {
+    //                 host.set_buffer_in(dep_handle.clone(), BufferInPort::default());
+    //             }
+    //         }
+    //     }
 
-        fn remove_dependencies<T: BufferElem>(
-            host: &mut Host,
-            module: &ModuleInternals,
-            module_handle: ModuleHandle,
-        ) {
-            for (port_idx, in_port) in T::get_buffers_in(&module.buf_in).buffers.iter().enumerate()
-            {
-                match in_port {
-                    BufferInPort::OutBuffer(_) => {
-                        host.set_buffer_in(
-                            ModuleBufferHandle {
-                                module_handle: module_handle.clone(),
-                                buf_handle: BufferHandle::new(port_idx),
-                            },
-                            BufferInPort::<T>::default(),
-                        );
-                    }
-                    BufferInPort::Constant(_) => {}
-                }
-            }
-        }
+    //     fn remove_dependencies<T: BufferElem>(
+    //         host: &mut Host,
+    //         module: &ModuleInternals,
+    //         module_handle: ModuleHandle,
+    //     ) {
+    //         for (port_idx, in_port) in T::get_buffers_in(&module.buf_in).buffers.iter().enumerate()
+    //         {
+    //             match in_port {
+    //                 BufferInPort::OutBuffer(_) => {
+    //                     host.set_buffer_in(
+    //                         ModuleBufferHandle {
+    //                             module_handle: module_handle.clone(),
+    //                             buf_handle: BufferHandle::new(port_idx),
+    //                         },
+    //                         BufferInPort::<T>::default(),
+    //                     );
+    //                 }
+    //                 BufferInPort::Constant(_) => {}
+    //             }
+    //         }
+    //     }
 
-        if handle == self.output_handle {
-            panic!()
-        }
+    //     if handle == self.output_handle {
+    //         panic!()
+    //     }
 
-        self.module_handles.retain(|_, &mut v| v != handle);
+    //     self.module_handles.retain(|_, &mut v| v != handle);
 
-        let module = self.modules.remove(&handle.idx).unwrap();
-        remove_dependents::<f32>(self, &module);
-        remove_dependencies::<f32>(self, &module, handle);
-        remove_dependents::<MidiEvents>(self, &module);
-        remove_dependencies::<MidiEvents>(self, &module, handle);
-    }
+    //     let module = self.modules.remove(&handle.idx).unwrap();
+    //     remove_dependents::<f32>(self, &module);
+    //     remove_dependencies::<f32>(self, &module, handle);
+    //     remove_dependents::<MidiEvents>(self, &module);
+    //     remove_dependencies::<MidiEvents>(self, &module, handle);
+    // }
 
     // pub fn update_module<T: Module + ModuleTypes>(
     //     &mut self,
@@ -921,7 +991,7 @@ impl Host {
                 .iter()
                 .map(|port| match port {
                     BufferInPort::OutBuffer(handle) => {
-                        let buf_out = &host.modules.get(&handle.module_handle.idx).unwrap().buf_out;
+                        let buf_out = &host.modules[&handle.module_handle.idx].buf_out;
                         &T::get_buffers_out(buf_out)
                             .get_buf(handle.buf_handle)
                             .buffer as *const _
@@ -982,17 +1052,48 @@ impl Host {
         }
     }
 
-    pub fn create_group(&mut self, name: &str, descriptor: GroupDescriptor) -> GroupHandle {
+    pub fn create_group(
+        &mut self,
+        name: &str,
+        anonymous_instances: usize,
+        named_instances: Option<&Vec<&str>>,
+    ) -> HostResult<GroupHandle> {
         if self.group_handles.contains_key(name) {
-            panic!()
+            return Err(HostError::DuplicateIdentifier {
+                ident: name.to_owned(),
+                ident_type: HostIdentifier::Group,
+            });
         }
-        let group = Group::new(descriptor);
+
+        let mut group = Group::default();
         let idx = self.next_group_idx;
+        let handle = GroupHandle { idx };
+
+        group.num_instances += anonymous_instances;
+        if let Some(named_instances) = named_instances {
+            group.num_instances += named_instances.len();
+            for (i, &instance_name) in named_instances.iter().enumerate() {
+                if group.named_instances.contains_key(instance_name) {
+                    return Err(HostError::DuplicateIdentifier {
+                        ident: instance_name.to_owned(),
+                        ident_type: HostIdentifier::GroupInstance,
+                    });
+                }
+
+                let instance_handle = GroupInstanceHandle {
+                    group: handle,
+                    offset: i,
+                };
+                group
+                    .named_instances
+                    .insert(instance_name.to_owned(), instance_handle);
+            }
+        }
+
         self.next_group_idx += 1;
         self.groups.insert(idx, group);
-        let handle = GroupHandle { idx };
         self.group_handles.insert(name.to_owned(), handle);
-        handle
+        Ok(handle)
     }
 
     pub fn create_group_joining_module<T: Module + ModuleSettings>(
@@ -1000,19 +1101,31 @@ impl Host {
         group_handle: GroupHandle,
         name: &str,
         settings: T::Settings,
-    ) -> GroupJoiningModuleHandle {
+    ) -> HostResult<GroupJoiningModuleHandle> {
         let group = self.groups.get_mut(&group_handle.idx).unwrap();
         if group.handles.contains_key(name) {
-            panic!()
+            return Err(HostError::DuplicateIdentifier {
+                ident: name.to_owned(),
+                ident_type: HostIdentifier::GroupedModule,
+            });
         }
-        let num_args = group.descriptor.num_instances;
-        let module = self.create_variadic_module_anonymous::<T>(settings, num_args);
-        let handle = GroupJoiningModuleHandle { handle: module };
+        let num_args = group.num_instances;
+        let module = self
+            .create_variadic_module_anonymous::<T>(settings, num_args)
+            .map_err(|e| HostError::GroupedModuleInit {
+                group_name: self.group_name_from_handle(group_handle).to_owned(),
+                module_name: name.to_owned(),
+                source: e,
+            })?;
+        let handle = GroupJoiningModuleHandle {
+            group: group_handle,
+            handle: module,
+        };
         let group = self.groups.get_mut(&group_handle.idx).unwrap();
         group
             .handles
             .insert(name.to_owned(), GroupedModule::Joining(handle));
-        handle
+        Ok(handle)
     }
 
     pub fn create_group_instance_variadic_module<T: Module + ModuleSettings>(
@@ -1021,21 +1134,32 @@ impl Host {
         name: &str,
         settings: &T::Settings,
         num_args: usize,
-    ) -> GroupInstanceModuleHandle {
+    ) -> HostResult<GroupInstanceModuleHandle> {
         let group = self.groups.get_mut(&group_handle.idx).unwrap();
         if group.handles.contains_key(name) {
-            panic!()
+            return Err(HostError::DuplicateIdentifier {
+                ident: name.to_owned(),
+                ident_type: HostIdentifier::GroupedModule,
+            });
         }
-        let num_instances = group.descriptor.num_instances;
+        let num_instances = group.num_instances;
         let modules = (0..num_instances)
             .map(|_| self.create_variadic_module_anonymous::<T>(settings.clone(), num_args))
-            .collect();
-        let handle = GroupInstanceModuleHandle { handles: modules };
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| HostError::GroupedModuleInit {
+                group_name: self.group_name_from_handle(group_handle).to_owned(),
+                module_name: name.to_owned(),
+                source: e,
+            })?;
+        let handle = GroupInstanceModuleHandle {
+            group: group_handle,
+            handles: modules,
+        };
         let group = self.groups.get_mut(&group_handle.idx).unwrap();
         group
             .handles
             .insert(name.to_owned(), GroupedModule::Instance(handle.clone()));
-        handle
+        Ok(handle)
     }
 
     pub fn create_group_instance_module<T: Module + ModuleSettings>(
@@ -1043,7 +1167,7 @@ impl Host {
         group_handle: GroupHandle,
         name: &str,
         settings: &T::Settings,
-    ) -> GroupInstanceModuleHandle {
+    ) -> HostResult<GroupInstanceModuleHandle> {
         self.create_group_instance_variadic_module::<T>(group_handle, name, settings, 0)
     }
 
@@ -1051,52 +1175,70 @@ impl Host {
         &self,
         handle: GroupJoiningModuleHandle,
         name: &str,
-    ) -> GroupBufferHandle<T> {
-        self.variadic_buf(handle.ungrouped(), name).all()
+    ) -> HostResult<GroupBufferHandle<T>> {
+        Ok(self
+            .variadic_buf(handle.ungrouped(), name)?
+            .all(handle.group))
     }
 
     pub fn group_instance_buf<T: BufferDir>(
         &self,
         handle: &GroupInstanceModuleHandle,
         name: &str,
-    ) -> GroupBufferHandle<T> {
-        GroupBufferHandle {
+    ) -> HostResult<GroupBufferHandle<T>> {
+        Ok(GroupBufferHandle {
+            group: handle.group,
             handles: handle
                 .handles
                 .iter()
                 .map(|&module| self.buf(module, name))
-                .collect(),
-        }
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 
     pub fn group_instance_variadic_buf<T: BufferDir>(
         &self,
         handle: &GroupInstanceModuleHandle,
         name: &str,
-    ) -> GroupVariadicBufferHandle<T> {
-        GroupVariadicBufferHandle {
+    ) -> HostResult<GroupVariadicBufferHandle<T>> {
+        Ok(GroupVariadicBufferHandle {
+            group: handle.group,
             handles: handle
                 .handles
                 .iter()
                 .map(|&module| self.variadic_buf(module, name))
-                .collect(),
-        }
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    fn group_name_from_handle(&self, handle: GroupHandle) -> &str {
+        self.group_handles
+            .iter()
+            .find(|(_, &v)| v == handle)
+            .unwrap()
+            .0
     }
 }
 
 #[derive(Clone)]
 pub struct GroupInstanceModuleHandle {
+    group: GroupHandle,
     handles: Vec<ModuleHandle>,
 }
 
 impl GroupInstanceModuleHandle {
-    pub fn ungrouped(&self, instance: GroupInstanceHandle) -> ModuleHandle {
-        self.handles[instance.offset]
+    pub fn ungrouped(&self, instance: GroupInstanceHandle) -> HostResult<ModuleHandle> {
+        if self.group != instance.group {
+            Err(HostError::InstanceGroupMismatch)
+        } else {
+            Ok(self.handles[instance.offset])
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 pub struct GroupJoiningModuleHandle {
+    group: GroupHandle,
     handle: ModuleHandle,
 }
 
@@ -1113,73 +1255,158 @@ enum GroupedModule {
 
 #[derive(Clone, Copy)]
 pub struct GroupInstanceHandle {
+    group: GroupHandle,
     offset: usize,
 }
 
-pub struct GroupDescriptor {
-    num_instances: usize,
-    named_instances: FastHashMap<String, GroupInstanceHandle>,
-}
-
-impl GroupDescriptor {
-    pub fn new() -> Self {
-        Self {
-            num_instances: 0,
-            named_instances: Default::default(),
-        }
-    }
-
-    pub fn with_anonymous_instances(&mut self, amt: usize) {
-        self.num_instances += amt;
-    }
-
-    pub fn with_named_instance(&mut self, name: &str) -> GroupInstanceHandle {
-        if self.named_instances.contains_key(name) {
-            panic!()
-        }
-
-        let handle = GroupInstanceHandle {
-            offset: self.num_instances,
-        };
-        self.named_instances.insert(name.to_owned(), handle);
-        self.num_instances += 1;
-        handle
-    }
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct GroupHandle {
     idx: usize,
 }
 
+#[derive(Default)]
 struct Group {
-    descriptor: GroupDescriptor,
+    num_instances: usize,
+    named_instances: FastHashMap<String, GroupInstanceHandle>,
     handles: FastHashMap<String, GroupedModule>,
-}
-
-impl Group {
-    pub fn new(descriptor: GroupDescriptor) -> Self {
-        Self {
-            descriptor,
-            handles: Default::default(),
-        }
-    }
 }
 
 #[derive(Clone)]
 pub struct GroupBufferHandle<T: BufferDir> {
+    group: GroupHandle,
     handles: Vec<ModuleBufferHandle<T>>,
 }
 
 #[derive(Clone)]
 pub struct GroupVariadicBufferHandle<T: BufferDir> {
+    group: GroupHandle,
     handles: Vec<ModuleVariadicBufferHandle<T>>,
 }
 
 impl<T: BufferDir> GroupVariadicBufferHandle<T> {
-    pub fn at(&self, idx: usize) -> GroupBufferHandle<T> {
-        GroupBufferHandle {
-            handles: self.handles.iter().map(|h| h.at(idx)).collect(),
+    pub fn at(&self, idx: usize) -> HostResult<GroupBufferHandle<T>> {
+        Ok(GroupBufferHandle {
+            group: self.group,
+            handles: self
+                .handles
+                .iter()
+                .map(|h| h.at(idx))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BufferArity {
+    Single,
+    Variadic,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BufferElemEnum {
+    Signal,
+    Midi,
+}
+impl Display for BufferElemEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BufferElemEnum::Signal => write!(f, "signal"),
+            BufferElemEnum::Midi => write!(f, "MIDI"),
         }
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BufferDirEnum {
+    In,
+    Out,
+}
+impl Display for BufferDirEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BufferDirEnum::In => write!(f, "in"),
+            BufferDirEnum::Out => write!(f, "out"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BufferType {
+    dir: BufferDirEnum,
+    elem: BufferElemEnum,
+}
+impl Display for BufferType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.elem, self.dir)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum HostIdentifier {
+    Module,
+    GroupedModule,
+    Group,
+    GroupInstance,
+    Buffer(BufferType),
+}
+impl Display for HostIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostIdentifier::Module => write!(f, "module"),
+            HostIdentifier::GroupedModule => write!(f, "grouped module"),
+            HostIdentifier::Group => write!(f, "group"),
+            HostIdentifier::GroupInstance => write!(f, "group instance"),
+            HostIdentifier::Buffer(bt) => write!(f, "{}-buffer", bt),
+        }
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum ModuleError {
+    #[error("{0}")]
+    Custom(String),
+    #[error("the {buffer_type}-buffer identifier `{ident}` already exists in this module")]
+    DuplicateBufferIdentifier {
+        ident: String,
+        buffer_type: BufferType,
+    },
+}
+
+#[derive(Error, Debug)]
+pub enum HostError {
+    #[error("failed to initialize module `{module_name}`")]
+    ModuleInit {
+        module_name: String,
+        source: ModuleError,
+    },
+    #[error("failed to initialize module `{module_name}` in group `{group_name}`")]
+    GroupedModuleInit {
+        group_name: String,
+        module_name: String,
+        source: ModuleError,
+    },
+    #[error("the {ident_type} identifier `{ident}` already exists in this context")]
+    DuplicateIdentifier {
+        ident: String,
+        ident_type: HostIdentifier,
+    },
+    #[error("the {ident_type} identifier `{ident}` was not found in this context")]
+    NonexistentIdentifier {
+        ident: String,
+        ident_type: HostIdentifier,
+    },
+    #[error("variadic buffer index out of bounds (index: {idx}, length: {len})")]
+    VariadicBufferOutOfBounds { idx: usize, len: usize },
+    #[error("unexpected buffer arity (expected {expected:?}, found {found:?})")]
+    UnexpectedBufferArity {
+        expected: BufferArity,
+        found: BufferArity,
+    },
+    #[error("attempted to link two grouped module buffers with mismatched groups")]
+    BufferGroupMismatch,
+    #[error("attempted to get a grouped module using an instance handle from a different group")]
+    InstanceGroupMismatch,
+}
+
+type ModuleResult<T> = Result<T, ModuleError>;
+pub type HostResult<T> = Result<T, HostError>;

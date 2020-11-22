@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use crate::{
     constants::*,
     host::{
@@ -43,6 +45,7 @@ pub struct EnvelopeSettings {
 
 impl ModuleSettings for Envelope {
     type Settings = EnvelopeSettings;
+    type Error = Infallible;
 }
 
 impl Module for Envelope {
@@ -50,7 +53,7 @@ impl Module for Envelope {
         mut desc: ModuleDescriptor,
         settings: EnvelopeSettings,
         _: usize,
-    ) -> BuiltModuleDescriptor<Self> {
+    ) -> Result<BuiltModuleDescriptor<Self>, Infallible> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             signal_in: desc.with_buf_in::<f32>("in"),
@@ -67,7 +70,7 @@ impl Module for Envelope {
             release_amplitude: 0.0,
             settings,
         };
-        desc.build(module)
+        Ok(desc.build(module))
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
@@ -178,6 +181,7 @@ pub enum OpType {
 
 impl ModuleSettings for Op {
     type Settings = OpType;
+    type Error = Infallible;
 }
 
 impl Module for Op {
@@ -185,7 +189,7 @@ impl Module for Op {
         mut desc: ModuleDescriptor,
         operation: OpType,
         _: usize,
-    ) -> BuiltModuleDescriptor<Self> {
+    ) -> Result<BuiltModuleDescriptor<Self>, Infallible> {
         let module = Self {
             op: operation,
             signal_in: desc.with_variadic_buf_in_default(
@@ -197,7 +201,7 @@ impl Module for Op {
             ),
             signal_out: desc.with_buf_out::<f32>("out"),
         };
-        desc.build(module)
+        Ok(desc.build(module))
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
@@ -207,7 +211,7 @@ impl Module for Op {
                 for val_out in signal_out.iter_mut() {
                     *val_out = 0.0;
                 }
-                for buf_in in buffers_in.get_iter(self.signal_in) {
+                for buf_in in buffers_in.get_variadic(self.signal_in) {
                     for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
                         *val_out += val_in;
                     }
@@ -217,7 +221,7 @@ impl Module for Op {
                 for val_out in signal_out.iter_mut() {
                     *val_out = 1.0;
                 }
-                for buf_in in buffers_in.get_iter(self.signal_in) {
+                for buf_in in buffers_in.get_variadic(self.signal_in) {
                     for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
                         *val_out *= val_in;
                     }
@@ -227,7 +231,7 @@ impl Module for Op {
                 for val_out in signal_out.iter_mut() {
                     *val_out = 0.0;
                 }
-                for buf_in in buffers_in.get_iter(self.signal_in) {
+                for buf_in in buffers_in.get_variadic(self.signal_in) {
                     for (val_in, val_out) in buf_in.iter().zip(signal_out.iter_mut()) {
                         *val_out -= val_in;
                     }
@@ -291,6 +295,7 @@ pub enum OscillatorSettings {
 
 impl ModuleSettings for Oscillator {
     type Settings = OscillatorSettings;
+    type Error = Infallible;
 }
 
 impl Module for Oscillator {
@@ -298,7 +303,7 @@ impl Module for Oscillator {
         mut desc: ModuleDescriptor,
         settings: OscillatorSettings,
         _: usize,
-    ) -> BuiltModuleDescriptor<Self> {
+    ) -> Result<BuiltModuleDescriptor<Self>, Infallible> {
         let module = Self {
             midi_in: desc.with_buf_in::<MidiEvents>("in"),
             pitch_shift: desc.with_buf_in_default::<f32>("pitch_shift", 1.0),
@@ -315,7 +320,7 @@ impl Module for Oscillator {
                 ..Default::default()
             },
         };
-        desc.build(module)
+        Ok(desc.build(module))
     }
 
     fn fill_buffers(&mut self, buffers_in: &ModuleBuffersIn, buffers_out: &mut ModuleBuffersOut) {
